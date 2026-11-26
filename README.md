@@ -13,6 +13,9 @@
 - Add Git repository clone URLs using HTTPS or SSH.
 - Supports common hosting services and arbitrary custom Git server hostnames; no provider-specific REST API is required for Git mirroring.
 - Handles nested namespaces such as GitLab groups and subgroups.
+- Store new mirrors as a normal bare `.git` folder, a ZIP archive, or a 7z archive.
+- Select minimum, medium, or maximum compression for ZIP/7z storage.
+- Automatically prefill the Add Repository field when the clipboard contains a valid HTTPS/SSH repository URL.
 - Create bare Git mirrors containing branches, tags, and Git objects.
 - Refresh repositories every **10 minutes** by default; the interval is configurable.
 - Preserve old ref tips before each fetch under `refs/gitarchive/snapshots/`, retaining history after force-pushes.
@@ -51,6 +54,20 @@ git@git.example.net:team/project.git
 GitArchive does not need to know the brand of a custom server: the Git client handles the Git transport. Hosting-provider names are used for display and organization only. HTTPS and SSH are supported; plain HTTP, local filesystem paths, URL-embedded passwords/tokens, query strings, and unsupported remote-helper transports are rejected. Configure private-repository credentials through Git Credential Manager or SSH keys. GitArchive does not ask for or store personal access tokens.
 
 The mirror engine archives Git repository data, not each hosting site's complete web platform. Provider-specific Releases attachments, wiki pages, Issues, Pull Requests/Merge Requests, CI artifacts, Git LFS object payloads, and the separate repositories referenced by submodules are not downloaded in this version. Git LFS pointers remain in Git history until dedicated LFS archiving is added; submodule repositories should be added to GitArchive separately.
+
+## Storage formats and compression
+
+The **New archive format** setting applies to repositories added after the setting is saved. Existing repositories keep their recorded format; changing the setting never migrates or rewrites existing archives.
+
+- **Folder (.git)** is the recommended default. Git fetches directly into the bare mirror, so there is no full archive extraction/repacking step and no extra archiver process.
+- **ZIP (.zip)** is broadly compatible. Updates extract the compressed mirror into a temporary folder, run Git fetch, then create a replacement ZIP.
+- **7z (.7z)** generally offers a smaller archive than ZIP at the cost of longer compression/decompression. Updates use the same safe temporary-workspace flow.
+
+ZIP and 7z use the installed **7-Zip command-line executable**. GitArchive does not download or bundle 7-Zip. It looks for `7z.exe` / `7zz` in PATH and common Windows installation folders. Install 7-Zip from [the official site](https://www.7-zip.org/) and restart GitArchive; compressed formats remain unavailable when its CLI is not found.
+
+Compression levels map to 7-Zip levels 1 / 5 / 9 (fastest / normal / ultra). The 7z mode uses LZMA2 with a 16 / 32 / 64 MiB dictionary cap, and both formats use one compression thread. Compressed synchronization is serialized so it does not compete with other repository jobs for CPU and disk bandwidth. “Maximum” is still slower and more memory-intensive than the other levels.
+
+A compressed mirror must be unpacked before Git can update it. During synchronization, free space may be needed for an additional uncompressed copy of that repository. The previous archive is left untouched until the replacement archive has been created successfully. Commit history and restore operations unpack to temporary folders and remove those folders afterward.
 
 ## Repository history and context menu
 
@@ -94,6 +111,7 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 - Python: https://www.python.org/downloads/windows/
 - Rust: https://rustup.rs/
 - Git for Windows: https://git-scm.com/download/win/
+- 7-Zip (optional; required only for ZIP/7z storage): https://www.7-zip.org/
 
 ## Data locations
 
@@ -140,7 +158,7 @@ Run the Rust integration tests (requires the stable Rust toolchain):
 cargo test --manifest-path rust-core/Cargo.toml
 ```
 
-The URL tests cover GitHub, GitLab nested groups, Codeberg, SSH, custom domains and ports, and unsafe URL rejection. The Rust integration tests create temporary local Git repositories and verify force-push retention, deleted-branch retention with pruning enabled, idempotent snapshots, safe restoration, and accepted/rejected Git transports.
+The URL tests cover GitHub, GitLab nested groups, Codeberg, SSH, custom domains and ports, and unsafe URL rejection. Additional tests cover folder/ZIP/7z path generation and compressed-file size accounting. The Rust integration tests create temporary local Git repositories and verify force-push retention, deleted-branch retention with pruning enabled, idempotent snapshots, safe restoration, supported storage/compression options, archive path traversal rejection, and accepted/rejected Git transports.
 
 ## License
 
