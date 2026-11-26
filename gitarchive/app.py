@@ -679,7 +679,7 @@ class LanPeerDialog(QDialog):
     def discover(self) -> None:
         self.discovered.clear()
         self.status.setText("Идёт поиск по подключённым частным IPv4-подсетям…")
-        self.start_task(discover_local_peers, self.discovery_finished, self.port.value())
+        self.start_task(discover_local_peers, self.discovery_finished, self.remote_port.value())
 
     def discovery_finished(self, peers: list[dict[str, str]]) -> None:
         self.discovered.clear()

@@ -65,8 +65,24 @@ def _require_private_ipv4(address: str) -> str:
     return str(parsed)
 
 
+def local_ipv4_addresses() -> list[str]:
+    """Return private IPv4 addresses for listener binding, including large subnets."""
+    found: set[str] = set()
+    for addresses in psutil.net_if_addrs().values():
+        for address in addresses:
+            if address.family != socket.AF_INET or not address.address:
+                continue
+            try:
+                ip = ipaddress.ip_address(address.address.split("%", 1)[0])
+            except ValueError:
+                continue
+            if _is_local_address(ip):
+                found.add(str(ip))
+    return sorted(found, key=lambda value: int(ipaddress.ip_address(value)))
+
+
 def local_ipv4_interfaces() -> list[tuple[str, ipaddress.IPv4Network]]:
-    """Return unique small private IPv4 interface networks and their local IPs."""
+    """Return small private IPv4 interface networks eligible for automatic scans."""
     found: dict[str, ipaddress.IPv4Network] = {}
     for addresses in psutil.net_if_addrs().values():
         for address in addresses:
@@ -410,7 +426,7 @@ class LanPeerService:
         return bool(self._servers)
 
     def local_addresses(self) -> list[str]:
-        return [address for address, _network in local_ipv4_interfaces()]
+        return local_ipv4_addresses()
 
     def start(self, port: int = DEFAULT_PORT) -> list[str]:
         if self.is_running:
@@ -515,6 +531,10 @@ class LanPeerService:
         return next((peer for peer in self.peers() if peer["peer_id"] == target), None)
 
     def _store_peer(self, peer_id: str, cert_pem: str, address: str, port: int) -> dict[str, Any]:
+        address = _require_private_ipv4(address)
+        port = int(port)
+        if not 1024 <= port <= 65535:
+            raise ValueError("Порт сопряжённого устройства вне допустимого диапазона.")
         _certificate, parsed_id, fingerprint = _validate_identity_certificate(cert_pem)
         if parsed_id != str(uuid.UUID(peer_id)):
             raise ValueError("Идентификатор не совпадает с сертификатом пира.")
@@ -561,6 +581,7 @@ class LanPeerService:
         return context
 
     def _handle_pair(self, connection: ssl.SSLSocket, message: dict[str, Any], address: str) -> None:
+        address = _require_private_ipv4(address)
         with self._lock:
             code = self.pairing_code
             expires = self.pairing_expires
@@ -605,6 +626,9 @@ class LanPeerService:
         expected_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         address = _require_private_ipv4(address)
+        port = int(port)
+        if not 1024 <= port <= 65535:
+            raise ValueError("Порт удалённого устройства вне допустимого диапазона.")
         code = str(pairing_code).strip()
         if len(code) < 24 or len(code) > 128:
             raise ValueError("Код должен быть полным одноразовым кодом сопряжения.")
@@ -649,6 +673,7 @@ class LanPeerService:
             return self._store_peer(remote_id, remote_pem, address, int(port))
 
     def _handle_bundle(self, connection: ssl.SSLSocket, message: dict[str, Any], address: str) -> None:
+        address = _require_private_ipv4(address)
         client_der = connection.getpeercert(binary_form=True)
         if not client_der:
             raise PermissionError("Для передачи требуется сопряжённое устройство.")
@@ -811,9 +836,11 @@ def import_incoming_bundle(
         raise ValueError("Git URL и метаданные репозитория не совпадают.")
     peer_id = str(uuid.UUID(str(sidecar.get("source_peer_id"))))
     peer_slug = peer_id.replace("-", "")
-    timestamp = str(int(time.time()))
+    timestamp = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     target = archive_path(Path(storage_root).expanduser(), host, namespace, name, "folder")
     target.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(target.parent).free < expected_size + 64 * 1024 * 1024:
+        raise OSError("Недостаточно места для временного зеркала: оставь место ещё как минимум под размер bundle и запас 64 МБ.")
 
     temporary_mirror = target.parent / f".{target.name}.incoming-{uuid.uuid4().hex}"
     try:

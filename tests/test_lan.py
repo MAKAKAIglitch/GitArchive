@@ -61,6 +61,7 @@ class LanAddressTests(unittest.TestCase):
         }
         with patch.object(lan.psutil, "net_if_addrs", return_value=interfaces):
             result = lan.local_ipv4_interfaces()
+            bind_addresses = lan.local_ipv4_addresses()
         self.assertEqual(
             result,
             [
@@ -68,6 +69,7 @@ class LanAddressTests(unittest.TestCase):
                 ("192.168.1.20", ipaddress.ip_network("192.168.1.0/24")),
             ],
         )
+        self.assertEqual(bind_addresses, ["10.2.0.10", "10.147.17.5", "192.168.1.20"])
 
 
 class LanIdentityTests(unittest.TestCase):
