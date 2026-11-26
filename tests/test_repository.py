@@ -179,6 +179,10 @@ class GitRemoteUrlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_git_url("ssh://git:password@git.example.net/team/repo.git")
 
+    def test_rejects_ssh_option_injection_username(self):
+        with self.assertRaises(ValueError):
+            parse_git_url("ssh://-oProxyCommand=bad@git.example.net/team/repo.git")
+
     def test_rejects_query_fragment_and_unsupported_transport(self):
         values = (
             "https://git.example.net/team/repo.git?token=secret",
