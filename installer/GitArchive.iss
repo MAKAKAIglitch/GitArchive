@@ -33,5 +33,8 @@ Source: "..\dist\GitArchive\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 Name: "{group}\GitArchive"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\GitArchive"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GitArchive"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить GitArchive"; Flags: postinstall nowait skipifsilent
