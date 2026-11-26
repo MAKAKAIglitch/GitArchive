@@ -125,6 +125,8 @@ impl ProcessPriority {
                 eprintln!("WARNING: Could not set the GitArchive engine memory priority.");
             }
         }
+        #[cfg(not(windows))]
+        let _ = self;
     }
 
     fn apply_to_pid(self, pid: u32) {
@@ -141,7 +143,10 @@ impl ProcessPriority {
             let _ = CloseHandle(process);
         }
         #[cfg(not(windows))]
-        let _ = pid;
+        {
+            let _ = self;
+            let _ = pid;
+        }
     }
 }
 
