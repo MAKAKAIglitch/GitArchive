@@ -21,7 +21,7 @@
 - Preserve old ref tips before each fetch under `refs/gitarchive/snapshots/`, retaining history after force-pushes.
 - Restore a normal working copy from a local mirror, including archived historical refs.
 - Never prune remote refs or delete a local mirror when its source becomes unavailable.
-- Run several repository syncs concurrently (three by default) and stream Git transfer progress into the activity log.
+- Run up to three folder-format syncs concurrently by default; compressed archive updates are serialized to keep CPU and disk load predictable.
 - Show local archive sizes and apply a global **soft** storage limit.
 - Keep a persistent local activity log and prevent multiple app instances from writing to the same mirrors.
 - Minimize to the Windows notification area (system tray).
@@ -115,7 +115,7 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 
 ## Data locations
 
-Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. New mirrors are stored under the folder configured in Settings. GitHub mirrors retain the original `<storage>/<owner>/<repo>.git` layout for compatibility. Other hosts are stored under `<storage>/_custom/<host>/<namespace>/<repo>.git`, so identical project paths on different servers do not collide.
+Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. Archives are stored under the folder configured in Settings. GitHub folder mirrors keep the original `<storage>/<owner>/<repo>.git` layout for compatibility; compressed repositories use `.zip` or `.7z` at the same location. Other hosts are stored under `<storage>/_custom/<host>/<namespace>/` with the selected `.git`, `.zip` or `.7z` extension, so identical project paths on different servers do not collide.
 
 A mirror is a standard bare Git repository. In the desktop app, select a repository and choose **Restore working copy**. The restore command creates a separate working folder and also fetches the preserved historical refs; it never overwrites an existing destination or changes the source archive.
 
