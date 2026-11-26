@@ -60,10 +60,19 @@ if errorlevel 1 (
 )
 
 echo [BUILD] Building the Rust archive engine...
-cargo build --release --manifest-path rust-core\Cargo.toml
+echo [INFO] Using one Cargo job to reduce concurrent build-script launches.
+cargo build --release --jobs 1 --manifest-path rust-core\Cargo.toml
 if errorlevel 1 (
-    echo [TIP] If Cargo reports that link.exe or the MSVC linker is missing,
-    echo install Visual Studio Build Tools with the C++ build tools workload.
+    echo.
+    echo [DIAGNOSTIC] Rust build failed.
+    echo If the message above contains "could not execute process" and "os error 5",
+    echo Windows denied execution of a generated Cargo build helper.
+    echo Open Windows Security ^> Virus ^& threat protection ^> Protection history.
+    echo Check the newest event and its exact detected file and threat name.
+    echo Do not add the whole project or target folder to antivirus exclusions.
+    echo.
+    echo If the event instead mentions link.exe or the MSVC linker,
+    echo install Visual Studio Build Tools with the C++ build tools workload:
     echo https://visualstudio.microsoft.com/visual-cpp-build-tools/
     goto :failed
 )
