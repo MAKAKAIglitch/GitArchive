@@ -2,143 +2,99 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gitarchive.repository import (
-    folder_size,
-    human_size,
-    parse_repository_url,
-    provider_name,
-    safe_path_part,
-    storage_key,
-)
+from gitarchive.repository import archive_path, folder_size, human_size, parse_git_url, parse_github_url
 
 
 class GitRemoteUrlTests(unittest.TestCase):
-    def test_github_https_repository_url(self):
-        self.assertEqual(
-            parse_repository_url("https://github.com/MAKAKAIglitch/GitArchive"),
-            (
-                "https://github.com/MAKAKAIglitch/GitArchive.git",
-                "github.com",
-                "MAKAKAIglitch",
-                "GitArchive",
-            ),
-        )
+    def test_github_https_url_and_legacy_parser(self):
+        expected = ("https://github.com/MAKAKAIglitch/GitArchive.git", "MAKAKAIglitch", "GitArchive")
+        parsed = parse_git_url("https://github.com/MAKAKAIglitch/GitArchive")
+        self.assertEqual(parsed[:3], expected)
+        self.assertEqual(parse_github_url("https://github.com/MAKAKAIglitch/GitArchive"), expected)
+        self.assertEqual(parsed[3:], ("github.com", "GitHub"))
 
     def test_github_repository_subpage_is_normalized(self):
         self.assertEqual(
-            parse_repository_url("https://github.com/owner/repo/tree/main"),
-            ("https://github.com/owner/repo.git", "github.com", "owner", "repo"),
+            parse_git_url("https://github.com/owner/repo/tree/main")[:3],
+            ("https://github.com/owner/repo.git", "owner", "repo"),
         )
 
-    def test_github_ssh_repository_url(self):
+    def test_github_scp_ssh_url(self):
         self.assertEqual(
-            parse_repository_url("git@github.com:owner/repo.git"),
-            ("git@github.com:owner/repo.git", "github.com", "owner", "repo"),
+            parse_git_url("git@github.com:owner/repo.git")[:3],
+            ("git@github.com:owner/repo.git", "owner", "repo"),
         )
 
-    def test_gitlab_nested_group(self):
+    def test_gitlab_nested_group_and_project_page(self):
         self.assertEqual(
-            parse_repository_url("https://gitlab.com/group/subgroup/project.git"),
-            (
-                "https://gitlab.com/group/subgroup/project.git",
-                "gitlab.com",
-                "group/subgroup",
-                "project",
-            ),
+            parse_git_url("https://gitlab.com/group/subgroup/project/-/tree/main")[:3],
+            ("https://gitlab.com/group/subgroup/project.git", "group/subgroup", "project"),
         )
 
-    def test_gitlab_web_page_suffix_is_removed(self):
+    def test_gitlab_project_root(self):
         self.assertEqual(
-            parse_repository_url("https://gitlab.com/group/subgroup/project/-/tree/main"),
-            (
-                "https://gitlab.com/group/subgroup/project.git",
-                "gitlab.com",
-                "group/subgroup",
-                "project",
-            ),
+            parse_git_url("https://gitlab.com/group/subgroup/project")[:3],
+            ("https://gitlab.com/group/subgroup/project.git", "group/subgroup", "project"),
         )
 
-    def test_codeberg_repository(self):
+    def test_codeberg_repository_subpage(self):
         self.assertEqual(
-            parse_repository_url("https://codeberg.org/owner/repo"),
-            ("https://codeberg.org/owner/repo.git", "codeberg.org", "owner", "repo"),
+            parse_git_url("https://codeberg.org/owner/repo/src/branch/main")[:3],
+            ("https://codeberg.org/owner/repo.git", "owner", "repo"),
         )
+        self.assertEqual(parse_git_url("https://codeberg.org/owner/repo")[4], "Codeberg")
 
-    def test_custom_https_server_and_port(self):
+    def test_custom_https_server_with_nested_namespace(self):
+        result = parse_git_url("https://git.example.net/team/subteam/project.git")
+        self.assertEqual(result[:3], ("https://git.example.net/team/subteam/project.git", "team/subteam", "project"))
+        self.assertEqual(result[3:], ("git.example.net", "Свой Git-сервер"))
+
+    def test_custom_ssh_server_with_port(self):
+        result = parse_git_url("ssh://git@git.example.net:2222/team/project")
+        self.assertEqual(result[:3], ("ssh://git@git.example.net:2222/team/project.git", "team", "project"))
+        self.assertEqual(result[3], "git.example.net:2222")
+
+    def test_custom_scp_ssh_server(self):
         self.assertEqual(
-            parse_repository_url("https://git.example.net:8443/dev/team/repo.git"),
-            (
-                "https://git.example.net:8443/dev/team/repo.git",
-                "git.example.net:8443",
-                "dev/team",
-                "repo",
-            ),
+            parse_git_url("git@git.example.net:team/subteam/project.git")[:3],
+            ("git@git.example.net:team/subteam/project.git", "team/subteam", "project"),
         )
 
-    def test_custom_ssh_url(self):
-        self.assertEqual(
-            parse_repository_url("ssh://git@git.example.net:2222/team/project.git"),
-            (
-                "ssh://git@git.example.net:2222/team/project.git",
-                "git.example.net:2222",
-                "team",
-                "project",
-            ),
-        )
-
-    def test_custom_scp_style_ssh_url(self):
-        self.assertEqual(
-            parse_repository_url("git@git.example.net:team/project"),
-            (
-                "git@git.example.net:team/project.git",
-                "git.example.net",
-                "team",
-                "project",
-            ),
-        )
-
-    def test_friendly_provider_names(self):
-        self.assertEqual(provider_name("github.com"), "GitHub")
-        self.assertEqual(provider_name("gitlab.com"), "GitLab")
-        self.assertEqual(provider_name("codeberg.org"), "Codeberg")
-        self.assertEqual(provider_name("git.internal.lan"), "Свой Git-сервер")
-
-    def test_storage_key_is_windows_safe(self):
-        self.assertEqual(storage_key("git.example.net:8443"), "git.example.net_8443")
-        self.assertEqual(safe_path_part("CON"), "_CON")
-        self.assertEqual(safe_path_part("project"), "project")
-
-    def test_rejects_plain_http(self):
+    def test_rejects_insecure_http(self):
         with self.assertRaises(ValueError):
-            parse_repository_url("http://git.example.net/group/repo.git")
+            parse_git_url("http://git.example.net/team/project")
+
+    def test_rejects_embedded_https_credentials(self):
+        with self.assertRaises(ValueError):
+            parse_git_url("https://user:token@git.example.net/team/project")
+
+    def test_rejects_query_and_fragment(self):
+        with self.assertRaises(ValueError):
+            parse_git_url("https://git.example.net/team/project?token=secret")
 
     def test_rejects_missing_repository(self):
         with self.assertRaises(ValueError):
-            parse_repository_url("https://github.com/owner")
+            parse_git_url("https://gitlab.com/group")
 
     def test_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
-            parse_repository_url("https://github.com/../repo")
+            parse_git_url("https://git.example.net/team/../project")
 
-    def test_rejects_encoded_path_separator(self):
+    def test_rejects_encoded_path_traversal(self):
         with self.assertRaises(ValueError):
-            parse_repository_url("https://github.com/owner/repo%2f..")
+            parse_git_url("https://git.example.net/team/%2e%2e/project")
 
-    def test_rejects_credentials_in_https_url(self):
+    def test_rejects_invalid_repo_path_separator(self):
         with self.assertRaises(ValueError):
-            parse_repository_url("https://user:token@git.example.net/team/repo.git")
+            parse_git_url("https://git.example.net/team/project%2frepo")
 
-    def test_rejects_query_and_fragment(self):
-        for value in (
-            "https://git.example.net/team/repo.git?token=secret",
-            "https://git.example.net/team/repo.git#branch",
-        ):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                parse_repository_url(value)
-
-    def test_rejects_unsupported_git_transport(self):
-        with self.assertRaises(ValueError):
-            parse_repository_url("git://git.example.net/team/repo.git")
+    def test_archive_paths_keep_github_layout_and_isolate_hosts(self):
+        root = Path("C:/GitArchive")
+        self.assertEqual(archive_path(root, "github.com", "owner", "repo"), root / "owner" / "repo.git")
+        self.assertEqual(
+            archive_path(root, "gitlab.com", "group/subgroup", "repo"),
+            root / "_custom" / "gitlab.com" / "group" / "subgroup" / "repo.git",
+        )
 
 
 class ArchiveSizeTests(unittest.TestCase):
