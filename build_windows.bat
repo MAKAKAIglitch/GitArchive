@@ -24,6 +24,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not exist "assets\GitArchive.svg" (
+    echo [ERROR] Missing assets\GitArchive.svg.
+    exit /b 1
+)
+
 if not exist ".venv\Scripts\python.exe" (
     py -3 -m venv .venv
     if errorlevel 1 exit /b 1
@@ -31,12 +36,16 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt -r requirements-build.txt
 if errorlevel 1 exit /b 1
 
+echo [BUILD] Generating the Windows application icon...
+".venv\Scripts\python.exe" scripts\build_icon.py --output build\GitArchive.ico
+if errorlevel 1 goto :failed
+
 echo [BUILD] Building the Rust engine...
 cargo build --release --jobs 1 --manifest-path rust-core\Cargo.toml
 if errorlevel 1 goto :failed
 
 echo [BUILD] Packaging the Windows application...
-".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onedir --name GitArchive run_gitarchive.py
+".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onedir --name GitArchive --icon build\GitArchive.ico --add-data "assets\GitArchive.svg;assets" --hidden-import PySide6.QtSvg run_gitarchive.py
 if errorlevel 1 goto :failed
 
 if not exist "rust-core\target\release\gitarchive-core.exe" (

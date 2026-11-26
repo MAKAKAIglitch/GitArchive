@@ -18,6 +18,7 @@ OutputBaseFilename=GitArchive-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\build\GitArchive.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
@@ -30,8 +31,8 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 Source: "..\dist\GitArchive\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\GitArchive"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\GitArchive"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{group}\GitArchive"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\GitArchive"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GitArchive"; Flags: uninsdeletevalue

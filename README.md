@@ -1,5 +1,9 @@
 # GitArchive
 
+<p align="center">
+  <img src="assets/GitArchive.svg" alt="GitArchive application icon" width="160">
+</p>
+
 **GitArchive** is a local-first desktop application for keeping persistent Git mirrors of remote repositories. The desktop interface is built with PySide6 and follows the visual language of Windows 11 / WinUI 3; the archive engine is written in Rust.
 
 > Current status: early MVP foundation. GitArchive archives Git repository data from GitHub, GitLab, Codeberg, Bitbucket, Gitea, Forgejo, SourceHut, and custom/self-hosted Git servers through standard HTTPS or SSH clone URLs.
@@ -68,7 +72,7 @@ Install Python 3.11+, Rust stable, Git for Windows, and (for the installer) Inno
 build_windows.bat
 ```
 
-The script builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Outputs:
+The script generates the Windows multi-resolution icon from the source SVG, builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Outputs:
 
 - Portable application: `dist\\GitArchive\\GitArchive.exe` plus its adjacent runtime files.
 - Installer: `dist-installer\\GitArchive-Setup.exe` (when Inno Setup is installed).

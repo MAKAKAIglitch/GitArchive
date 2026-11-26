@@ -10,8 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from .repository import archive_path, folder_size, human_size, parse_git_url
+
+from PySide6.QtSvg import QSvgRenderer
 
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -23,6 +25,26 @@ from PySide6.QtWidgets import (
 
 APP_NAME = "GitArchive"
 GIB = 1024 ** 3
+
+
+def resource_path(*parts: str) -> Path:
+    """Resolve bundled resources in source and PyInstaller one-folder builds."""
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    root = Path(bundled_root) if bundled_root else Path(__file__).resolve().parents[1]
+    return root.joinpath(*parts)
+
+
+def app_icon() -> QIcon:
+    path = resource_path("assets", "GitArchive.svg")
+    renderer = QSvgRenderer(str(path))
+    if not renderer.isValid():
+        return QIcon()
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def repository_label(repo: dict) -> str:
@@ -372,6 +394,7 @@ class GitArchiveWindow(QMainWindow):
         self.allow_exit = False
         self.dark = True
         self.accent = "#60a5fa"
+        self.setWindowIcon(app_icon())
         self.setWindowTitle("GitArchive")
         self.resize(1180, 780)
         self.setMinimumSize(960, 650)
@@ -412,10 +435,20 @@ class GitArchiveWindow(QMainWindow):
         self.sidebar.setFixedWidth(220)
         side = QVBoxLayout(self.sidebar)
         side.setContentsMargins(14, 22, 14, 16)
-        logo = QLabel("◈  GitArchive")
+        logo_row = QWidget()
+        logo_layout = QHBoxLayout(logo_row)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(9)
+        logo_image = QLabel()
+        logo_image.setFixedSize(32, 32)
+        logo_image.setPixmap(app_icon().pixmap(32, 32))
+        logo_layout.addWidget(logo_image)
+        logo = QLabel("GitArchive")
         logo.setObjectName("Logo")
         logo.setFont(QFont("Segoe UI Variable", 17, QFont.Weight.DemiBold))
-        side.addWidget(logo)
+        logo_layout.addWidget(logo)
+        logo_layout.addStretch(1)
+        side.addWidget(logo_row)
         side.addSpacing(26)
         self.nav = []
         for index, title in enumerate(("Обзор", "Репозитории", "Журнал", "Настройки")):
@@ -625,7 +658,10 @@ class GitArchiveWindow(QMainWindow):
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+        icon = app_icon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray.setIcon(icon)
         self.tray.setToolTip("GitArchive — локальный архив Git-репозиториев")
         menu = QMenu()
         show = QAction("Открыть GitArchive", self)
@@ -1212,6 +1248,9 @@ def main() -> int:
     QApplication.setOrganizationName(APP_NAME)
     QApplication.setApplicationName(APP_NAME)
     app = QApplication(sys.argv)
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     app.setQuitOnLastWindowClosed(False)
     # Keep Qt's native Windows widget style; the app stylesheet adds Fluent layout and surfaces.
 
