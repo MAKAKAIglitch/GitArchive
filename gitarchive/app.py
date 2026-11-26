@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStackedWidget, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
+    QScrollArea, QStackedWidget, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
     QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -253,7 +253,8 @@ class GitCommand(QRunnable):
                 env=environment,
                 creationflags=process_creation_flags(self.cpu_priority),
             )
-            apply_memory_priority_to_handle(process._handle, self.memory_priority)
+            if os.name == "nt":
+                apply_memory_priority_to_handle(process._handle, self.memory_priority)
             try:
                 stdout, stderr = process.communicate(timeout=self.timeout)
             except subprocess.TimeoutExpired:
@@ -718,7 +719,13 @@ class GitArchiveWindow(QMainWindow):
         self.pages.addWidget(activity)
 
         settings = QWidget()
-        s = QVBoxLayout(settings)
+        settings_layout = QVBoxLayout(settings)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_content = QWidget()
+        s = QVBoxLayout(settings_content)
         s.setContentsMargins(0, 0, 0, 0)
         card = QFrame()
         card.setObjectName("Card")
@@ -848,6 +855,8 @@ class GitArchiveWindow(QMainWindow):
         save.clicked.connect(self.save_settings)
         s.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
         s.addStretch(1)
+        settings_scroll.setWidget(settings_content)
+        settings_layout.addWidget(settings_scroll)
         self.pages.addWidget(settings)
 
     def make_table(self) -> QTableWidget:
