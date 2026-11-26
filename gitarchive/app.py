@@ -9,7 +9,10 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
-from .repository import folder_size, human_size, parse_github_url
+from .repository import (
+    folder_size, human_size, parse_repository_url, provider_name,
+    safe_path_part, storage_key,
+)
 
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -20,6 +23,13 @@ from PySide6.QtWidgets import (
 
 APP_NAME = "GitArchive"
 GIB = 1024 ** 3
+
+
+def repository_label(repo: dict) -> str:
+    host = str(repo.get("host") or "github.com")
+    namespace = str(repo.get("namespace") or repo.get("owner") or "")
+    name = str(repo.get("name") or "")
+    return f"{namespace}/{name}  ·  {host}"
 
 
 def data_dir() -> Path:
@@ -368,7 +378,7 @@ class GitArchiveWindow(QMainWindow):
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
-        self.tray.setToolTip("GitArchive — локальный архив GitHub")
+        self.tray.setToolTip("GitArchive — локальный архив Git-репозиториев")
         menu = QMenu()
         show = QAction("Открыть GitArchive", self)
         show.triggered.connect(self.show_from_tray)
@@ -424,25 +434,60 @@ class GitArchiveWindow(QMainWindow):
         QApplication.quit()
 
     def add_repository(self) -> None:
-        value, ok = QInputDialog.getText(self, "Добавить репозиторий", "Ссылка на GitHub:", QLineEdit.EchoMode.Normal, "https://github.com/owner/repository")
+        prompt = (
+            "HTTPS или SSH clone URL (GitHub, GitLab, Codeberg, Bitbucket, "
+            "Gitea, Forgejo или свой сервер):"
+        )
+        value, ok = QInputDialog.getText(
+            self,
+            "Добавить Git-репозиторий",
+            prompt,
+            QLineEdit.EchoMode.Normal,
+            "https://gitlab.com/group/project.git",
+        )
         if not ok:
             return
         try:
-            url, owner, name = parse_github_url(value)
+            url, host, namespace, name = parse_repository_url(value)
         except ValueError as error:
             QMessageBox.warning(self, "Ссылка не распознана", str(error))
             return
-        if any(repo.get("url", "").lower() == url.lower() for repo in self.config["repositories"]):
-            QMessageBox.information(self, "Уже добавлен", "Этот репозиторий уже есть в GitArchive.")
-            return
-        path = Path(self.config["storage_path"]) / owner / f"{name}.git"
+
+        identity = (host.casefold(), namespace, name)
+        for existing in self.config["repositories"]:
+            existing_identity = (
+                str(existing.get("host") or "github.com").casefold(),
+                str(existing.get("namespace") or existing.get("owner") or ""),
+                str(existing.get("name") or ""),
+            )
+            if existing_identity == identity:
+                QMessageBox.information(
+                    self, "Уже добавлен", "Этот репозиторий уже есть в GitArchive."
+                )
+                return
+
+        path = (
+            Path(self.config["storage_path"])
+            / storage_key(host)
+            / Path(*(safe_path_part(part) for part in namespace.split("/")))
+            / f"{safe_path_part(name)}.git"
+        )
         repo = {
-            "id": uuid.uuid4().hex, "owner": owner, "name": name, "url": url,
-            "local_path": str(path), "status": "В очереди", "last_sync": None, "last_error": "",
+            "id": uuid.uuid4().hex,
+            "host": host,
+            "provider": provider_name(host),
+            "namespace": namespace,
+            "owner": namespace,
+            "name": name,
+            "url": url,
+            "local_path": str(path),
+            "status": "В очереди",
+            "last_sync": None,
+            "last_error": "",
         }
         self.config["repositories"].append(repo)
         save_config(self.config)
-        self.log(f"Добавлен {owner}/{name}")
+        self.log(f"Добавлен {repository_label(repo)}")
         self.refresh()
         self.scan_sizes()
         self.sync_one(repo["id"])
@@ -500,7 +545,7 @@ class GitArchiveWindow(QMainWindow):
         process.errorOccurred.connect(lambda error, p=process: self.restore_error(p, error))
         self.restore_process = process
         self.restore_destination = destination
-        self.log(f"Восстановление {repo['owner']}/{repo['name']} → {destination}")
+        self.log(f"Восстановление {repository_label(repo)} → {destination}")
         process.start(
             str(self.core),
             ["restore", "--archive", str(archive), "--destination", str(destination)],
@@ -612,7 +657,7 @@ class GitArchiveWindow(QMainWindow):
         text = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
         repo_id = next((key for key, item in self.processes.items() if item is process), None)
         repo = self.find_repo(repo_id) if repo_id else None
-        prefix = f"{repo['owner']}/{repo['name']}: " if repo else ""
+        prefix = f"{repository_label(repo)}: " if repo else ""
         for line in text.splitlines():
             if line.strip():
                 self.log(prefix + line.strip())
@@ -645,7 +690,7 @@ class GitArchiveWindow(QMainWindow):
                 repo["status"] = "Готово"
                 repo["last_sync"] = datetime.now().astimezone().isoformat(timespec="minutes")
                 repo["last_error"] = ""
-                self.log(f"Готово: {repo['owner']}/{repo['name']}")
+                self.log(f"Готово: {repository_label(repo)}")
             else:
                 repo["status"] = "Ошибка — архив сохранён"
                 repo["last_error"] = f"Код завершения: {code}"
@@ -705,7 +750,7 @@ class GitArchiveWindow(QMainWindow):
                         last = datetime.fromisoformat(last).strftime("%d.%m.%Y %H:%M")
                 except ValueError:
                     pass
-                values = (f"{repo.get('owner', '')}/{repo.get('name', '')}", repo.get("status", "Добавлен"), last, human_size(bytes_used) if bytes_used else "—")
+                values = (repository_label(repo), repo.get("status", "Добавлен"), last, human_size(bytes_used) if bytes_used else "—")
                 for col, value in enumerate(values):
                     cell = QTableWidgetItem(value)
                     if col == 0:
