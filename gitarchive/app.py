@@ -476,6 +476,7 @@ class GitArchiveWindow(QMainWindow):
         save_config(self.config)
         self.log(f"Добавлен {owner}/{name}")
         self.refresh()
+        self.scan_sizes()
         self.sync_one(repo["id"])
 
     def selected_repo(self, table: QTableWidget) -> dict | None:
