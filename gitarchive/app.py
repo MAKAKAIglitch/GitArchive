@@ -698,7 +698,6 @@ class GitArchiveWindow(QMainWindow):
         for table in (self.dashboard_table, self.repo_table):
             table.setRowCount(len(repos))
             for row, repo in enumerate(repos):
-                local = Path(repo.get("local_path", ".")) if repo.get("local_path") else Path("__missing__")
                 bytes_used = self.size_cache.get(repo.get("id"), 0)
                 last = repo.get("last_sync") or "—"
                 try:
