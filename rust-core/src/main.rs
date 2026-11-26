@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
@@ -54,8 +55,168 @@ enum Commands {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ProcessPriority {
+    cpu: CpuPriority,
+    memory: MemoryPriority,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CpuPriority {
+    Idle,
+    BelowNormal,
+    Normal,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MemoryPriority {
+    VeryLow,
+    Low,
+    Normal,
+}
+
+impl ProcessPriority {
+    fn from_environment() -> Self {
+        let cpu = match std::env::var("GITARCHIVE_CPU_PRIORITY")
+            .unwrap_or_else(|_| "normal".to_owned())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "idle" => CpuPriority::Idle,
+            "below_normal" => CpuPriority::BelowNormal,
+            _ => CpuPriority::Normal,
+        };
+        let memory = match std::env::var("GITARCHIVE_MEMORY_PRIORITY")
+            .unwrap_or_else(|_| "normal".to_owned())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "very_low" => MemoryPriority::VeryLow,
+            "low" => MemoryPriority::Low,
+            _ => MemoryPriority::Normal,
+        };
+        Self { cpu, memory }
+    }
+
+    fn cpu_class(self) -> u32 {
+        match self.cpu {
+            CpuPriority::Idle => 0x00000040,        // IDLE_PRIORITY_CLASS
+            CpuPriority::BelowNormal => 0x00004000, // BELOW_NORMAL_PRIORITY_CLASS
+            CpuPriority::Normal => 0x00000020,      // NORMAL_PRIORITY_CLASS
+        }
+    }
+
+    fn memory_value(self) -> u32 {
+        match self.memory {
+            MemoryPriority::VeryLow => 1, // MEMORY_PRIORITY_VERY_LOW
+            MemoryPriority::Low => 2,     // MEMORY_PRIORITY_LOW
+            MemoryPriority::Normal => 5,  // MEMORY_PRIORITY_NORMAL
+        }
+    }
+
+    fn apply_current(self) {
+        #[cfg(windows)]
+        unsafe {
+            let process = GetCurrentProcess();
+            if SetPriorityClass(process, self.cpu_class()) == 0 {
+                eprintln!("WARNING: Could not set the GitArchive engine CPU priority.");
+            }
+            if !set_memory_priority(process, self.memory_value()) {
+                eprintln!("WARNING: Could not set the GitArchive engine memory priority.");
+            }
+        }
+    }
+
+    fn apply_to_pid(self, pid: u32) {
+        #[cfg(windows)]
+        unsafe {
+            if self.memory_value() >= 5 {
+                return;
+            }
+            let process = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+            if process.is_null() {
+                return;
+            }
+            let _ = set_memory_priority(process, self.memory_value());
+            let _ = CloseHandle(process);
+        }
+        #[cfg(not(windows))]
+        let _ = pid;
+    }
+}
+
+#[cfg(windows)]
+const PROCESS_SET_INFORMATION: u32 = 0x0200;
+#[cfg(windows)]
+const PROCESS_MEMORY_PRIORITY_CLASS: i32 = 0x27;
+
+#[cfg(windows)]
+#[repr(C)]
+struct MemoryPriorityInformation {
+    memory_priority: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn SetPriorityClass(process: *mut std::ffi::c_void, priority_class: u32) -> i32;
+    fn SetProcessInformation(
+        process: *mut std::ffi::c_void,
+        information_class: i32,
+        information: *const std::ffi::c_void,
+        information_size: u32,
+    ) -> i32;
+    fn OpenProcess(
+        desired_access: u32,
+        inherit_handle: i32,
+        process_id: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+unsafe fn set_memory_priority(process: *mut std::ffi::c_void, value: u32) -> bool {
+    let information = MemoryPriorityInformation { memory_priority: value };
+    SetProcessInformation(
+        process,
+        PROCESS_MEMORY_PRIORITY_CLASS,
+        &information as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<MemoryPriorityInformation>() as u32,
+    ) != 0
+}
+
+async fn run_background_status(mut command: Command) -> Result<ExitStatus> {
+    let priority = ProcessPriority::from_environment();
+    #[cfg(windows)]
+    command.creation_flags(priority.cpu_class());
+
+    let mut child = command.spawn().context("Could not start a background process")?;
+    if let Some(pid) = child.id() {
+        priority.apply_to_pid(pid);
+    }
+    child.wait().await.context("Could not wait for a background process")
+}
+
+async fn run_background_output(mut command: Command) -> Result<Output> {
+    let priority = ProcessPriority::from_environment();
+    #[cfg(windows)]
+    command.creation_flags(priority.cpu_class());
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn().context("Could not start a background process")?;
+    if let Some(pid) = child.id() {
+        priority.apply_to_pid(pid);
+    }
+    child
+        .wait_with_output()
+        .await
+        .context("Could not collect background process output")
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    ProcessPriority::from_environment().apply_current();
     if let Err(error) = run().await {
         eprintln!("ERROR: {error:#}");
         std::process::exit(1);
@@ -212,12 +373,13 @@ async fn sync_folder_mirror(url: &str, destination: &Path) -> Result<()> {
 
 async fn clone_mirror(url: &str, destination: &Path) -> Result<()> {
     println!("INFO: Creating the first bare mirror.");
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["clone", "--mirror", "--progress"])
         .arg(url)
-        .arg(destination)
-        .status()
+        .arg(destination);
+    let status = run_background_status(command)
         .await
         .context("Could not start Git clone")?;
     if !status.success() {
@@ -380,11 +542,12 @@ async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
     }
 
     println!("INFO: Creating a working copy from the local archive.");
-    let status = Command::new("git")
+    let mut clone_command = Command::new("git");
+    clone_command
         .args(["clone", "--progress"])
         .arg(archive)
-        .arg(destination)
-        .status()
+        .arg(destination);
+    let status = run_background_status(clone_command)
         .await
         .context("Could not start Git restore clone")?;
     if !status.success() {
@@ -395,13 +558,14 @@ async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
     }
 
     println!("INFO: Restoring preserved historical refs.");
-    let status = Command::new("git")
+    let mut fetch_command = Command::new("git");
+    fetch_command
         .arg("-C")
         .arg(destination)
         .args(["fetch", "--no-tags", "--force", "--progress"])
         .arg(archive)
-        .arg("+refs/gitarchive/snapshots/*:refs/gitarchive/snapshots/*")
-        .status()
+        .arg("+refs/gitarchive/snapshots/*:refs/gitarchive/snapshots/*");
+    let status = run_background_status(fetch_command)
         .await
         .context("Could not fetch preserved historical refs")?;
     if !status.success() {
@@ -567,10 +731,8 @@ async fn create_compressed_archive(
             .arg(format!("-md={dictionary}"));
     }
 
-    let status = command
-        .arg(destination)
-        .arg("mirror.git")
-        .status()
+    command.arg(destination).arg("mirror.git");
+    let status = run_background_status(command)
         .await
         .with_context(|| format!("Could not start 7-Zip at {}", seven_zip.display()))?;
     if !status.success() {
@@ -586,12 +748,13 @@ async fn extract_compressed_archive(
 ) -> Result<()> {
     validate_archive_paths(seven_zip, archive).await?;
     let output_path = format!("-o{}", destination.display());
-    let status = Command::new(seven_zip)
+    let mut command = Command::new(seven_zip);
+    command
         .arg("x")
         .arg(archive)
         .arg(output_path)
-        .args(["-y", "-mmt=1"])
-        .status()
+        .args(["-y", "-mmt=1"]);
+    let status = run_background_status(command)
         .await
         .with_context(|| format!("Could not start 7-Zip at {}", seven_zip.display()))?;
     if !status.success() {
@@ -604,10 +767,9 @@ async fn extract_compressed_archive(
 }
 
 async fn validate_archive_paths(seven_zip: &Path, archive: &Path) -> Result<()> {
-    let output = Command::new(seven_zip)
-        .args(["l", "-slt", "-sccUTF-8"])
-        .arg(archive)
-        .output()
+    let mut command = Command::new(seven_zip);
+    command.args(["l", "-slt", "-sccUTF-8"]).arg(archive);
+    let output = run_background_output(command)
         .await
         .context("Could not inspect the compressed archive before extraction")?;
     if !output.status.success() {
@@ -669,9 +831,9 @@ fn validate_archive_entry_path(raw_path: &str) -> Result<()> {
 }
 
 async fn check_git() -> Result<()> {
-    let output = Command::new("git")
-        .arg("--version")
-        .output()
+    let mut command = Command::new("git");
+    command.arg("--version");
+    let output = run_background_output(command)
         .await
         .context("Git for Windows was not found. Install Git for Windows and restart GitArchive.")?;
     if !output.status.success() {
@@ -683,11 +845,12 @@ async fn check_git() -> Result<()> {
 }
 
 async fn list_remote_refs(repository: &Path) -> Result<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repository)
-        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
-        .output()
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let output = run_background_output(command)
         .await
         .context("Could not list refs before comparing the archive")?;
     if !output.status.success() {
@@ -707,7 +870,8 @@ async fn fetch_existing_mirror(destination: &Path) -> Result<bool> {
     snapshot_refs(destination).await?;
     println!("INFO: Fetching remote refs without pruning.");
 
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(destination)
@@ -716,8 +880,8 @@ async fn fetch_existing_mirror(destination: &Path) -> Result<bool> {
             "-c", "fetch.prune=false",
             "-c", "remote.origin.prune=false",
             "fetch", "--progress", "--force", "origin", "+refs/*:refs/*",
-        ])
-        .status()
+        ]);
+    let status = run_background_status(command)
         .await
         .context("Could not start Git fetch")?;
 
@@ -801,11 +965,12 @@ fn validate_git_url(url: &str) -> Result<()> {
 }
 
 async fn snapshot_refs(repository: &Path) -> Result<()> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repository)
-        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
-        .output()
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let output = run_background_output(command)
         .await
         .context("Could not list refs in the existing archive")?;
     if !output.status.success() {
@@ -826,11 +991,12 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
         // The object ID makes this snapshot idempotent: unchanged refs do not
         // create another snapshot every ten-minute synchronization cycle.
         let snapshot_ref = format!("refs/gitarchive/snapshots/{object_id}/{suffix}");
-        let update = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(repository)
-            .args(["update-ref", &snapshot_ref, object_id])
-            .output()
+            .args(["update-ref", &snapshot_ref, object_id]);
+        let update = run_background_output(command)
             .await
             .context("Could not preserve an old Git ref")?;
         if !update.status.success() {
