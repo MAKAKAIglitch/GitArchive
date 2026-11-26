@@ -956,6 +956,9 @@ class GitArchiveWindow(QMainWindow):
         self.history_workers: list[GitCommand] = []
         self.seven_zip_path = find_7zip()
         self.download_proxy: ThrottledHttpProxy | None = None
+        self._default_https_proxy_loaded = False
+        self._default_https_proxy_cache: str | None = None
+        self._https_proxy_cache: dict[str, str | None] = {}
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
         self.sync_batch_errors = 0
@@ -1827,9 +1830,11 @@ class GitArchiveWindow(QMainWindow):
         return value
 
     def _default_https_proxy(self) -> str | None:
-        """Resolve the generic proxy Git/cURL uses for HTTPS destinations."""
+        """Resolve and cache the generic proxy Git/cURL uses for HTTPS."""
         if self.config.get("proxy_enabled"):
             return proxy_url(self.config)
+        if self._default_https_proxy_loaded:
+            return self._default_https_proxy_cache
 
         try:
             result = subprocess.run(
@@ -1840,25 +1845,40 @@ class GitArchiveWindow(QMainWindow):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=3,
+                timeout=1.5,
                 check=False,
             )
             configured = result.stdout.strip() if result.returncode == 0 else ""
             if configured:
-                return self._normalize_proxy_scheme(configured)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+                self._default_https_proxy_cache = self._normalize_proxy_scheme(configured)
+            else:
+                for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+                    value = os.environ.get(key, "").strip()
+                    if value:
+                        self._default_https_proxy_cache = self._normalize_proxy_scheme(value)
+                        break
+        except subprocess.TimeoutExpired as error:
+            raise ProxyConfigurationError(
+                "Could not read Git proxy settings quickly enough; the limiter was skipped"
+            ) from error
+        except OSError:
+            # Git may not be available on PATH yet; environment proxy values can
+            # still be forwarded without changing their meaning.
+            for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+                value = os.environ.get(key, "").strip()
+                if value:
+                    self._default_https_proxy_cache = self._normalize_proxy_scheme(value)
+                    break
 
-        for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
-            value = os.environ.get(key, "").strip()
-            if value:
-                return self._normalize_proxy_scheme(value)
-        return None
+        self._default_https_proxy_loaded = True
+        return self._default_https_proxy_cache
 
     def _configured_https_proxy(self, remote_url: str) -> str | None:
-        """Resolve any URL-specific Git proxy, falling back to the generic proxy."""
+        """Resolve URL-specific Git proxy settings, falling back to the generic proxy."""
         if self.config.get("proxy_enabled"):
             return proxy_url(self.config)
+        if remote_url in self._https_proxy_cache:
+            return self._https_proxy_cache[remote_url]
 
         try:
             result = subprocess.run(
@@ -1869,15 +1889,24 @@ class GitArchiveWindow(QMainWindow):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=3,
+                timeout=1.5,
                 check=False,
             )
             configured = result.stdout.strip() if result.returncode == 0 else ""
-            if configured:
-                return self._normalize_proxy_scheme(configured)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return self._default_https_proxy()
+            upstream = (
+                self._normalize_proxy_scheme(configured)
+                if configured
+                else self._default_https_proxy()
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ProxyConfigurationError(
+                "Could not resolve this remote's Git proxy settings; the limiter was skipped"
+            ) from error
+        except OSError:
+            upstream = self._default_https_proxy()
+
+        self._https_proxy_cache[remote_url] = upstream
+        return upstream
 
     def prepare_download_proxy(self, remote_url: str) -> str | None:
         """Return the local aggregate limiter URL for HTTPS remotes only."""
@@ -1890,13 +1919,12 @@ class GitArchiveWindow(QMainWindow):
                 return None
             port = parsed.port or 443
             no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
-            default_upstream = self._default_https_proxy()
+            upstream = self._configured_https_proxy(remote_url)
             if self.download_proxy is None:
                 self.download_proxy = ThrottledHttpProxy(limit_mbps * 1_000_000, no_proxy)
             else:
                 self.download_proxy.set_limit(limit_mbps * 1_000_000)
-            self.download_proxy.set_upstream_proxy(default_upstream, no_proxy)
-            upstream = self._configured_https_proxy(remote_url)
+            self.download_proxy.set_upstream_proxy(upstream, no_proxy)
             self.download_proxy.set_route(parsed.hostname, port, upstream)
             return self.download_proxy.start()
         except (OSError, ValueError, RuntimeError, ProxyConfigurationError) as error:
@@ -2372,6 +2400,9 @@ class GitArchiveWindow(QMainWindow):
             QMessageBox.warning(self, tr("Настройки не применены"), str(error))
             return
         save_config(self.config)
+        self._default_https_proxy_loaded = False
+        self._default_https_proxy_cache = None
+        self._https_proxy_cache.clear()
         if self.download_proxy is not None:
             self.download_proxy.set_limit(self.download_limit.value() * 1_000_000)
         self.sync_timer.setInterval(self.interval.value() * 60000)
