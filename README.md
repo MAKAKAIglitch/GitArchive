@@ -160,7 +160,9 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 
 Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. Archives are stored under the folder configured in Settings. GitHub folder mirrors keep the original `<storage>/<owner>/<repo>.git` layout for compatibility; compressed repositories use `.zip` or `.7z` at the same location. Other hosts are stored under `<storage>/_custom/<host>/<namespace>/` with the selected `.git`, `.zip` or `.7z` extension, so identical project paths on different servers do not collide.
 
-A mirror is a standard bare Git repository. In the desktop app, select a repository and choose **Restore working copy**. The restore command creates a separate working folder and also fetches the preserved historical refs; it never overwrites an existing destination or changes the source archive.
+A mirror is a standard bare Git repository. GitArchive stores **all advertised branches**, not just the default branch: the initial mirror clone copies every ref, and later updates fetch `+refs/*:refs/*` without pruning. A force-push or remote branch deletion does not erase the previous tip: it is retained under `refs/gitarchive/snapshots/`. Tags and other advertised refs are archived as well.
+
+In the desktop app, select a repository and choose **Restore working copy**. The restore command creates a separate working folder and also fetches the preserved historical refs; it never overwrites an existing destination or changes the source archive. The default branch is checked out automatically, while every other current branch is available as a remote-tracking branch (for example, `origin/feature`). Use `git branch -a` to list all restored branches and `git switch --track origin/feature` to start working on one.
 
 You can also restore it manually:
 
