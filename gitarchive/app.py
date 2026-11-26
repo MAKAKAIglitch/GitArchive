@@ -963,6 +963,8 @@ class GitArchiveWindow(QMainWindow):
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
         self.sync_batch_errors = 0
+        self.sync_batch_repo_ids: set[str] = set()
+        self.sync_batch_failed_ids: set[str] = set()
         self.sync_batch_paused = False
         self.sync_progress: dict[str, dict[str, object]] = {}
         self.allow_exit = False
@@ -1641,14 +1643,28 @@ class GitArchiveWindow(QMainWindow):
         ]
         repo_id = str(repo.get("id") or "")
         was_queued = repo_id in self.queue
+        was_in_batch = repo_id in self.sync_batch_repo_ids
         self.queue = [queued_id for queued_id in self.queue if queued_id != repo_id]
-        if was_queued:
-            self.sync_progress.pop(repo_id, None)
+        if was_in_batch:
+            self.sync_batch_repo_ids.discard(repo_id)
             self.sync_batch_total = max(0, self.sync_batch_total - 1)
-            if not self.queue and not self.processes:
+            if was_queued:
+                self.sync_progress.pop(repo_id, None)
+            else:
+                # The repository had already completed; remove it from both
+                # sides of the finished/total counter as well.
+                self.sync_batch_completed = max(0, self.sync_batch_completed - 1)
+                if repo_id in self.sync_batch_failed_ids:
+                    self.sync_batch_failed_ids.discard(repo_id)
+                    self.sync_batch_errors = max(0, self.sync_batch_errors - 1)
+            if not self.queue and not self.processes and self.sync_batch_total <= self.sync_batch_completed:
+                self.sync_batch_total = 0
                 self.sync_batch_completed = 0
                 self.sync_batch_errors = 0
                 self.sync_batch_paused = False
+                self.sync_progress.clear()
+                self.sync_batch_repo_ids.clear()
+                self.sync_batch_failed_ids.clear()
             self.update_sidebar_progress()
         save_config(self.config)
         self.log(tr(f"Убран из списка (архив сохранён): {repository_label(repo)}"))
@@ -1787,7 +1803,7 @@ class GitArchiveWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def sync_one(self, repo_id: str) -> None:
-        if repo_id in self.processes or repo_id in self.queue:
+        if repo_id in self.processes or repo_id in self.queue or repo_id in self.sync_batch_repo_ids:
             return
         if not self.core.is_file():
             QMessageBox.warning(self, tr("Rust-движок не найден"), tr("Запусти start.bat: он соберёт Rust-движок и откроет приложение."))
@@ -1798,6 +1814,9 @@ class GitArchiveWindow(QMainWindow):
             self.sync_batch_errors = 0
             self.sync_batch_paused = False
             self.sync_progress.clear()
+            self.sync_batch_repo_ids.clear()
+            self.sync_batch_failed_ids.clear()
+        self.sync_batch_repo_ids.add(repo_id)
         self.queue.append(repo_id)
         self.sync_batch_total += 1
         self.sync_progress[repo_id] = {"percent": 0, "phase": tr("Подготовка")}
@@ -1811,9 +1830,12 @@ class GitArchiveWindow(QMainWindow):
             self.sync_batch_errors = 0
             self.sync_batch_paused = False
             self.sync_progress.clear()
+            self.sync_batch_repo_ids.clear()
+            self.sync_batch_failed_ids.clear()
         for repo in self.config["repositories"]:
-            repo_id = repo.get("id")
-            if repo_id and repo_id not in self.processes and repo_id not in self.queue:
+            repo_id = str(repo.get("id") or "")
+            if repo_id and repo_id not in self.sync_batch_repo_ids:
+                self.sync_batch_repo_ids.add(repo_id)
                 self.queue.append(repo_id)
                 self.sync_batch_total += 1
                 self.sync_progress[repo_id] = {"percent": 0, "phase": tr("В очереди")}
@@ -2135,8 +2157,10 @@ class GitArchiveWindow(QMainWindow):
             self.sync_batch_total,
             self.sync_batch_completed + 1,
         )
+        self.sync_batch_failed_ids.discard(repo_id)
         if failed:
             self.sync_batch_errors += 1
+            self.sync_batch_failed_ids.add(repo_id)
         self.update_sidebar_progress()
 
     def update_sidebar_progress(self) -> None:
