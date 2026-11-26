@@ -70,6 +70,7 @@ async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
         // --progress forces Git to emit progress through the QProcess pipe,
         // so the desktop app can show live transfer activity.
         let status = Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
             .args(["clone", "--mirror", "--progress"])
             .arg(url)
             .arg(destination)
@@ -152,6 +153,7 @@ async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
     // disable pruning explicitly, including when the user's Git config enables it.
     // The explicit refspec updates current refs but leaves deleted remote refs local.
     let status = Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(destination)
         .args([
