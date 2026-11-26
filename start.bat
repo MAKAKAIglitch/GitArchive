@@ -50,9 +50,14 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto :failed
 )
 
-echo [SETUP] Installing Python dependencies...
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 goto :failed
+".venv\Scripts\python.exe" -c "import PySide6; v=tuple(map(int,PySide6.__version__.split('.')[:2])); raise SystemExit(0 if (6,8) <= v < (7,0) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo [SETUP] Installing or updating Python dependencies...
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 goto :failed
+) else (
+    echo [SETUP] PySide6 is already installed.
+)
 
 echo [BUILD] Building the Rust archive engine...
 cargo build --release --manifest-path rust-core\Cargo.toml
