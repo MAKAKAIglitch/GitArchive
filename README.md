@@ -94,7 +94,9 @@ The **Background CPU priority** and **Background memory priority** settings appl
 
 The selected values are passed to background processes at launch. They do not change the priority of the main GitArchive window.
 
-The sidebar shows the current synchronization batch. Its percentage is a live estimate based on Git / 7-Zip progress phases and equally weighted active repositories; it is not a byte-weighted overall transfer percentage.
+The HTTPS download limit defaults to **3 MB/s** (3,000,000 bytes/s). It is configurable in Settings from **0** (unlimited) to **100 MB/s**. One shared limit is used across all active HTTPS repository syncs, not a separate limit per repository. GitArchive routes HTTPS CONNECT traffic through a local-only loopback proxy; when a GitArchive, Git, or environment proxy is configured, the local proxy chains through it. SSH remotes are not rate-limited. Reducing download saturation can help reduce ping spikes while gaming, but cannot guarantee a particular ping because upload traffic, router queueing, and ISP congestion also matter.
+
+The sidebar shows only the current synchronization batch. Its percentage is a live estimate based on Git / 7-Zip progress phases and equally weighted active repositories; it is not a byte-weighted overall transfer percentage. The progress bar animates as Git reports progress and the card disappears after the batch reaches 100%.
 
 GitArchive also writes a **sync heartbeat once per minute** while a Rust synchronization process is still running, even when Git has not produced new output. After three minutes without output, the repository row changes to **No Git output** and the log records elapsed time and output-idle time. This is a diagnostic state, not an automatic cancellation: Git may be waiting for the network, disk, or local object processing, and a large but active transfer is left running. When Git output resumes, the row returns to **Synchronizing**.
 
@@ -114,6 +116,12 @@ The script generates the Windows multi-resolution icon from the source SVG, buil
 - Installer: `dist-installer\\GitArchive-Setup.exe` (when Inno Setup is installed).
 
 Git for Windows remains a runtime dependency and is not bundled. The installer is per-user and does not require administrator privileges. This build script has not yet been validated on a clean Windows machine; the first packaged build must be smoke-tested before distribution.
+
+### One-click GitHub Actions build
+
+The repository includes a **manual-only** Windows installer workflow at `.github/workflows/windows-installer.yml`. It does not run on pushes, pull requests, or a schedule. It uses one Windows runner, one Cargo build job, no build matrix or cache, and uploads only the finished installer with a 7-day retention period.
+
+To create the first artifact, enable GitHub Actions for the account and repository, open **Actions → Build Windows installer → Run workflow**, and wait for the manual run to finish. Download **GitArchive-Windows-Installer** from that run's Artifacts section. The artifact contains `GitArchive-Setup.exe`. The workflow also runs the Python unit tests before uploading it; a failed build or test does not publish an installer artifact.
 
 ## LAN and ZeroTier peer exchange
 
