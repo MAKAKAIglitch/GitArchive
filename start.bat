@@ -3,24 +3,27 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 title GitArchive - Windows launcher
 
+rem Prefer the Python launcher, but fall back to python.exe if its default
+rem interpreter is older than 3.11.
+set "PYTHON="
 where py >nul 2>nul
-if errorlevel 1 (
-    where python >nul 2>nul
-    if errorlevel 1 (
-        echo [ERROR] Python 3.11 or newer was not found.
-        echo Install Python from https://www.python.org/downloads/windows/
-        echo Enable the Python launcher or add Python to PATH, then run start.bat again.
-        pause
-        exit /b 1
-    )
-    set "PYTHON=python"
-) else (
-    set "PYTHON=py -3"
+if not errorlevel 1 (
+    py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PYTHON=py -3"
 )
 
-%PYTHON% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)"
-if errorlevel 1 (
-    echo [ERROR] GitArchive requires Python 3.11 or newer.
+if not defined PYTHON (
+    where python >nul 2>nul
+    if not errorlevel 1 (
+        python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>nul
+        if not errorlevel 1 set "PYTHON=python"
+    )
+)
+
+if not defined PYTHON (
+    echo [ERROR] Python 3.11 or newer was not found.
+    echo Install Python from https://www.python.org/downloads/windows/
+    echo Make sure the Python launcher or python.exe is available in PATH.
     pause
     exit /b 1
 )
