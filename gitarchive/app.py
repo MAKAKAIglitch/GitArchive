@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal, QEasingCurve, QPropertyAnimation
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
-from .repository import archive_path, find_7zip, folder_size, human_size, parse_git_url
+from .repository import archive_path, find_7zip, folder_size, human_size, parse_branch_refs, parse_git_url
 from .i18n import tr
 from .throttle import ProxyConfigurationError, ThrottledHttpProxy, normalize_download_limit
 from urllib.parse import urlsplit
@@ -312,6 +312,7 @@ class CommitHistoryDialog(QDialog):
         self.cleanup_path: Path | None = None
         self.commits: dict[str, dict[str, str]] = {}
         self.selected_sha: str | None = None
+        self.history_request_id = 0
         self.setWindowTitle(tr(f"История коммитов — {repo_name}"))
         self.resize(1050, 680)
         self.setMinimumSize(760, 480)
@@ -320,6 +321,14 @@ class CommitHistoryDialog(QDialog):
         header = QLabel(tr(f"История локального архива · {repo_name}"))
         header.setObjectName("Section")
         layout.addWidget(header)
+        branch_row = QHBoxLayout()
+        branch_row.addWidget(QLabel(tr("Ветка")))
+        self.branch_selector = QComboBox()
+        self.branch_selector.addItem(tr("Все ветки"), None)
+        self.branch_selector.setEnabled(False)
+        self.branch_selector.currentIndexChanged.connect(self.load_selected_history)
+        branch_row.addWidget(self.branch_selector, 1)
+        layout.addLayout(branch_row)
         body = QHBoxLayout()
         self.commit_list = QListWidget()
         self.commit_list.setMinimumWidth(330)
@@ -379,15 +388,60 @@ class CommitHistoryDialog(QDialog):
     def load_history(self) -> None:
         self.commit_list.clear()
         self.commit_list.addItem(tr("Загрузка истории…"))
+        self.branch_selector.setEnabled(False)
         self.run_git([
+            "git", "--git-dir", str(self.archive),
+            "for-each-ref", "--sort=refname", "--format=%(refname)",
+            "refs/heads", "refs/remotes",
+        ], self.branches_loaded)
+
+    def branches_loaded(self, code: int, stdout: str, stderr: str) -> None:
+        # Bare mirrors normally keep remote branches under refs/heads. Also
+        # show refs/remotes for archives created by older/non-mirror layouts.
+        branches = parse_branch_refs(stdout) if code == 0 else []
+        self.branch_selector.blockSignals(True)
+        self.branch_selector.clear()
+        self.branch_selector.addItem(tr("Все ветки"), None)
+        for ref, label in branches:
+            self.branch_selector.addItem(label, ref)
+        self.branch_selector.setCurrentIndex(0)
+        self.branch_selector.blockSignals(False)
+        self.branch_selector.setEnabled(True)
+        self.load_selected_history()
+
+    def load_selected_history(self, _index: int = -1) -> None:
+        self.history_request_id += 1
+        request_id = self.history_request_id
+        self.commits.clear()
+        self.selected_sha = None
+        self.download.setEnabled(False)
+        self.details.clear()
+        self.commit_list.clear()
+        self.commit_list.addItem(tr("Загрузка истории…"))
+
+        args = [
             "git", "--git-dir", str(self.archive),
             "log", "-n", "250", "--date=iso-strict",
             "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
-            "--all", "--decorate=short",
-        ], self.history_loaded)
+            "--decorate=short",
+        ]
+        branch_ref = self.branch_selector.currentData()
+        args.append(str(branch_ref) if branch_ref else "--all")
+        self.run_git(
+            args,
+            lambda code, stdout, stderr: self.history_loaded(
+                request_id, code, stdout, stderr
+            ),
+        )
 
-    def history_loaded(self, code: int, stdout: str, stderr: str) -> None:
+    def history_loaded(
+        self, request_id: int, code: int, stdout: str, stderr: str
+    ) -> None:
+        # Ignore a slower response if the user has already selected another branch.
+        if request_id != self.history_request_id:
+            return
         self.commit_list.clear()
+        self.commits.clear()
         if code != 0:
             self.details.setPlainText(stderr or tr("Не удалось прочитать историю Git."))
             return
@@ -405,7 +459,12 @@ class CommitHistoryDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, sha)
             self.commit_list.addItem(item)
         if not self.commits:
-            self.details.setPlainText(tr("В архиве пока нет коммитов."))
+            empty_message = (
+                tr("В архиве пока нет коммитов.")
+                if self.branch_selector.currentData() is None
+                else tr("В выбранной ветке пока нет коммитов.")
+            )
+            self.details.setPlainText(empty_message)
         elif self.commit_list.count():
             self.commit_list.setCurrentRow(0)
 

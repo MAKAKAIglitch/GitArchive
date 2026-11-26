@@ -67,6 +67,14 @@ class LocalizationTests(unittest.TestCase):
             "Unsupported upstream proxy URL scheme",
         )
 
+    def test_branch_history_labels_are_translated(self):
+        self.assertEqual(tr("Ветка", "en"), "Branch")
+        self.assertEqual(tr("Все ветки", "en"), "All branches")
+        self.assertEqual(
+            tr("В выбранной ветке пока нет коммитов.", "en"),
+            "There are no commits in the selected branch yet.",
+        )
+
     def test_heartbeat_text_is_translated_before_formatting(self):
         template = tr("Синхронизация всё ещё выполняется. Прошло {} с; новых данных от Git нет {} с.", "en")
         self.assertEqual(

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from gitarchive.i18n import tr
-from gitarchive.repository import archive_path, folder_size, human_size, parse_git_url
+from gitarchive.repository import archive_path, folder_size, human_size, parse_branch_refs, parse_git_url
 
 
 class GitRemoteUrlTests(unittest.TestCase):
@@ -214,6 +214,31 @@ class GitRemoteUrlTests(unittest.TestCase):
         for value in values:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_git_url(value)
+
+
+class BranchRefTests(unittest.TestCase):
+    def test_parse_local_and_remote_branches(self):
+        output = "\n".join((
+            "refs/heads/main",
+            "refs/heads/feature/new-ui",
+            "refs/heads/develop",
+            "refs/remotes/upstream/feature/new-ui",
+            "refs/remotes/origin/HEAD",
+            "refs/tags/v1.0.0",
+            "",
+        ))
+        self.assertEqual(
+            parse_branch_refs(output),
+            [
+                ("refs/heads/develop", "develop"),
+                ("refs/heads/feature/new-ui", "feature/new-ui"),
+                ("refs/heads/main", "main"),
+                ("refs/remotes/upstream/feature/new-ui", "upstream/feature/new-ui"),
+            ],
+        )
+
+    def test_empty_branch_output_returns_empty_list(self):
+        self.assertEqual(parse_branch_refs(""), [])
 
 
 class ArchiveSizeTests(unittest.TestCase):

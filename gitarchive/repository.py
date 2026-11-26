@@ -154,6 +154,33 @@ def provider_name(host: str) -> str:
     return tr("Свой Git-сервер")
 
 
+def parse_branch_refs(output: str) -> list[tuple[str, str]]:
+    """Parse branch refs into (full_ref, display_name) pairs for the history filter."""
+    branches: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_line in output.splitlines():
+        ref = raw_line.strip()
+        if ref.startswith("refs/heads/"):
+            label = ref[len("refs/heads/"):]
+        elif ref.startswith("refs/remotes/"):
+            label = ref[len("refs/remotes/"):]
+            # Symbolic remote HEAD entries are not selectable branches.
+            if label.endswith("/HEAD") or label == "HEAD":
+                continue
+        else:
+            continue
+
+        parts = label.split("/")
+        if not label or any(not part or part in {".", ".."} for part in parts):
+            continue
+        if ref in seen:
+            continue
+        seen.add(ref)
+        branches.append((ref, label))
+
+    return sorted(branches, key=lambda item: (item[1].casefold(), item[1], item[0]))
+
+
 def safe_path_part(value: str) -> str:
     """Validate one user-controlled namespace or repository path component."""
     if not _SAFE_COMPONENT.fullmatch(value or "") or value in {".", ".."}:
