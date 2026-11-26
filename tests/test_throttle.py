@@ -88,8 +88,9 @@ class ThrottledHttpProxyTests(unittest.TestCase):
                 response = bytearray()
                 while b"\r\n\r\n" not in response:
                     response.extend(client.recv(1024))
-                self.assertIn(b"200 Connection Established", response)
-                received = bytearray()
+                header, _separator, initial_payload = response.partition(b"\r\n\r\n")
+                self.assertIn(b"200 Connection Established", header)
+                received = bytearray(initial_payload)
                 started = time.monotonic()
                 while len(received) < len(payload):
                     chunk = client.recv(4096)
