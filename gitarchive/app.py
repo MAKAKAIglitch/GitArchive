@@ -35,6 +35,25 @@ APP_NAME = "GitArchive"
 GIB = 1024 ** 3
 
 
+_GIT_PROGRESS_PATTERN = re.compile(
+    r"(Enumerating objects|Counting objects|Compressing objects|Receiving objects|Resolving deltas|Updating files):\s*(\d{1,3})%",
+    re.IGNORECASE,
+)
+_GENERIC_PROGRESS_PATTERN = re.compile(r"(?<!\d)(\d{1,3})%(?=\s|[\r\n]|$)")
+
+
+def parse_sync_progress(output: str) -> tuple[int, str] | None:
+    """Extract progress from Git's phase output or 7-Zip's percentage lines."""
+    matches = list(_GIT_PROGRESS_PATTERN.finditer(output))
+    if matches:
+        match = matches[-1]
+        return min(100, int(match.group(2))), match.group(1).strip()
+    generic = list(_GENERIC_PROGRESS_PATTERN.finditer(output))
+    if generic:
+        return min(100, int(generic[-1].group(1))), "Архивация / распаковка"
+    return None
+
+
 def resource_path(*parts: str) -> Path:
     """Resolve bundled resources in source and PyInstaller one-folder builds."""
     bundled_root = getattr(sys, "_MEIPASS", None)
@@ -1272,14 +1291,28 @@ class GitArchiveWindow(QMainWindow):
         if not self.core.is_file():
             QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat: он соберёт Rust-движок и откроет приложение.")
             return
+        if not self.processes and not self.queue:
+            self.sync_batch_total = 0
+            self.sync_batch_completed = 0
+            self.sync_progress.clear()
         self.queue.append(repo_id)
+        self.sync_batch_total += 1
+        self.sync_progress[repo_id] = {"percent": 0, "phase": "Подготовка"}
+        self.update_sidebar_progress()
         self.start_queued()
 
     def sync_all(self) -> None:
+        if not self.processes and not self.queue:
+            self.sync_batch_total = 0
+            self.sync_batch_completed = 0
+            self.sync_progress.clear()
         for repo in self.config["repositories"]:
             repo_id = repo.get("id")
             if repo_id and repo_id not in self.processes and repo_id not in self.queue:
                 self.queue.append(repo_id)
+                self.sync_batch_total += 1
+                self.sync_progress[repo_id] = {"percent": 0, "phase": "В очереди"}
+        self.update_sidebar_progress()
         self.start_queued()
         self.refresh()
 
@@ -1297,17 +1330,22 @@ class GitArchiveWindow(QMainWindow):
                 break
 
             if self.total_size() >= int(self.config.get("max_storage_gb", 100)) * GIB:
-                for repo_id in self.queue:
+                pending_ids = list(self.queue)
+                for repo_id in pending_ids:
                     repo = self.find_repo(repo_id)
                     if repo:
                         repo["status"] = "Ожидание лимита"
+                    self.sync_progress.pop(repo_id, None)
+                self.sync_batch_completed += len(pending_ids)
                 self.queue.clear()
                 self.log("Достигнут лимит хранилища. Новые синхронизации приостановлены; архивы сохранены.")
+                self.update_sidebar_progress()
                 break
 
             repo_id = self.queue.pop(0)
             repo = self.find_repo(repo_id)
             if not repo:
+                self.complete_sync_progress(repo_id)
                 continue
 
             storage_format = repository_storage_format(repo)
@@ -1323,6 +1361,7 @@ class GitArchiveWindow(QMainWindow):
                 repo["last_error"] = "Для ZIP/7z требуется установленный 7-Zip CLI."
                 save_config(self.config)
                 self.log(f"Пропуск {repository_label(repo)}: 7-Zip не найден.")
+                self.complete_sync_progress(repo_id)
                 continue
 
             process = QProcess(self)
@@ -1332,6 +1371,7 @@ class GitArchiveWindow(QMainWindow):
             process.finished.connect(lambda code, _status, p=process: self.finished(p, code))
             process.errorOccurred.connect(lambda error, p=process: self.process_error(p, error))
             self.processes[repo_id] = process
+            self.sync_progress[repo_id] = {"percent": 0, "phase": "Запуск"}
             repo["status"] = "Синхронизация"
             repo["last_error"] = ""
             save_config(self.config)
@@ -1357,10 +1397,73 @@ class GitArchiveWindow(QMainWindow):
         text = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
         repo_id = next((key for key, item in self.processes.items() if item is process), None)
         repo = self.find_repo(repo_id) if repo_id else None
+        if repo_id and text:
+            progress = parse_sync_progress(text)
+            if progress:
+                percent, phase = progress
+                self.sync_progress[repo_id] = {"percent": percent, "phase": phase}
+                self.update_sidebar_progress()
         prefix = f"{repository_label(repo)}: " if repo else ""
         for line in text.splitlines():
             if line.strip():
                 self.log(prefix + line.strip())
+
+    def complete_sync_progress(self, repo_id: str) -> None:
+        self.sync_progress.pop(repo_id, None)
+        self.sync_batch_completed = min(
+            self.sync_batch_total,
+            self.sync_batch_completed + 1,
+        )
+        self.update_sidebar_progress()
+
+    def update_sidebar_progress(self) -> None:
+        if not hasattr(self, "sidebar_sync_bar"):
+            return
+        active_ids = list(self.processes)
+        active_count = len(active_ids)
+        queued_count = len(self.queue)
+        total = max(
+            self.sync_batch_total,
+            self.sync_batch_completed + active_count + queued_count,
+        )
+        completed = min(self.sync_batch_completed, total)
+
+        if total <= 0:
+            self.sidebar_sync_bar.setValue(0)
+            if not self.config["repositories"]:
+                self.sidebar_sync_label.setText("Пока нет репозиториев")
+                self.sidebar_sync_detail.setText("Добавь Git-репозиторий")
+            else:
+                self.sidebar_sync_label.setText("Ожидание синхронизации")
+                self.sidebar_sync_detail.setText(
+                    f"Репозиториев: {len(self.config['repositories'])}"
+                )
+            return
+
+        active_percent = sum(
+            int(self.sync_progress.get(repo_id, {}).get("percent", 0))
+            for repo_id in active_ids
+        )
+        overall = int(round((completed * 100 + active_percent) / total))
+        overall = max(0, min(100, overall))
+        self.sidebar_sync_bar.setValue(overall)
+
+        if active_count == 0 and queued_count == 0 and completed >= total:
+            self.sidebar_sync_label.setText("Синхронизация завершена")
+            self.sidebar_sync_detail.setText(f"{completed} из {total} репозиториев")
+            return
+
+        if active_count:
+            self.sidebar_sync_label.setText(f"Синхронизация · {overall}%")
+        else:
+            self.sidebar_sync_label.setText("Ожидание запуска")
+        phases = [
+            str(self.sync_progress.get(repo_id, {}).get("phase") or "")
+            for repo_id in active_ids
+        ]
+        phase = next((item for item in phases if item), "")
+        detail = f"{active_count} активн. · {queued_count} в очереди · {completed}/{total} готово"
+        self.sidebar_sync_detail.setText(f"{phase} · {detail}" if phase else detail)
 
     def process_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
         if error != QProcess.ProcessError.FailedToStart:
@@ -1372,6 +1475,7 @@ class GitArchiveWindow(QMainWindow):
             repo["status"] = "Ошибка запуска"
             repo["last_error"] = "Не удалось запустить Rust-движок."
             self.processes.pop(repo_id, None)
+            self.complete_sync_progress(repo_id)
         process.deleteLater()
         save_config(self.config)
         self.refresh()
@@ -1384,6 +1488,7 @@ class GitArchiveWindow(QMainWindow):
             process.deleteLater()
             return
         self.processes.pop(repo_id, None)
+        self.complete_sync_progress(repo_id)
         repo = self.find_repo(repo_id)
         if repo:
             if code == 0:
@@ -1464,6 +1569,7 @@ class GitArchiveWindow(QMainWindow):
                     table.setItem(row, col, cell)
             table.resizeRowsToContents()
         self.hint.setText(f"Занято {human_size(size)} из {self.config['max_storage_gb']} ГБ. Архивы не удаляются при недоступности исходного проекта.")
+        self.update_sidebar_progress()
 
     def load_logs(self) -> list[str]:
         path = data_dir() / "logs" / "gitarchive.log"
@@ -1602,6 +1708,8 @@ class GitArchiveWindow(QMainWindow):
             #Secondary:hover {{ background:{hover}; }}
             #Card {{ background:{card}; border:1px solid {border}; border-radius:12px; }}
             #Stat {{ font-size:24px; font-weight:650; }}
+            QProgressBar {{ background:{field}; border:0; border-radius:3px; height:6px; }}
+            QProgressBar::chunk {{ background:{self.accent}; border-radius:3px; }}
             QTableWidget {{ background:{card}; border:1px solid {border}; border-radius:10px; padding:5px; selection-background-color:{hover}; }}
             QTableWidget::item {{ padding:10px 8px; border:0; }}
             QHeaderView::section {{ background:{card}; color:{muted}; border:0; border-bottom:1px solid {border}; padding:10px 8px; font-weight:600; }}
