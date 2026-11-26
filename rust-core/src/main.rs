@@ -413,6 +413,16 @@ fn configure_git_network_limits(command: &mut Command, repository: Option<&Path>
         .arg("-c")
         .arg("http.keepAliveCount=3");
 
+    // GitArchive's local loopback proxy applies one aggregate download cap to
+    // concurrent HTTPS transfers. Accept only its strict localhost URL form.
+    if let Ok(proxy) = std::env::var("GITARCHIVE_HTTP_PROXY") {
+        if let Some(port) = proxy.strip_prefix("http://127.0.0.1:") {
+            if port.parse::<u16>().map(|value| value != 0).unwrap_or(false) {
+                command.arg("-c").arg(format!("http.proxy={proxy}"));
+            }
+        }
+    }
+
     // Respect a custom SSH command. Add OpenSSH timeouts only for its default
     // executable so existing SSH aliases / wrappers are not silently replaced.
     if !has_custom_ssh_command(repository) {
