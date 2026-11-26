@@ -2,11 +2,6 @@ name: Build Windows installer
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/windows-installer.yml
 
 permissions:
   contents: read
@@ -17,7 +12,6 @@ concurrency:
 
 jobs:
   build:
-    if: "github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'ci: trigger first installer build'"
     name: Windows x64 installer
     runs-on: windows-latest
     timeout-minutes: 45
