@@ -145,8 +145,11 @@ def windows_accent() -> str:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM")
         value, _ = winreg.QueryValueEx(key, "ColorizationColor")
         winreg.CloseKey(key)
-        color = QColor(int(value) & 255, (int(value) >> 8) & 255, (int(value) >> 16) & 255)
-        if color.isValid() and color.lightness() > 45:
+        # ColorizationColor is stored as ARGB (0xAARRGGBB).
+        color = QColor((int(value) >> 16) & 255, (int(value) >> 8) & 255, int(value) & 255)
+        if color.isValid():
+            if color.lightness() > 160:
+                color = color.darker(125)
             return color.name()
     except (OSError, ValueError, TypeError):
         pass
