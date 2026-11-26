@@ -1919,12 +1919,13 @@ class GitArchiveWindow(QMainWindow):
                 return None
             port = parsed.port or 443
             no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+            default_upstream = self._default_https_proxy()
             upstream = self._configured_https_proxy(remote_url)
             if self.download_proxy is None:
                 self.download_proxy = ThrottledHttpProxy(limit_mbps * 1_000_000, no_proxy)
             else:
                 self.download_proxy.set_limit(limit_mbps * 1_000_000)
-            self.download_proxy.set_upstream_proxy(upstream, no_proxy)
+            self.download_proxy.set_upstream_proxy(default_upstream, no_proxy)
             self.download_proxy.set_route(parsed.hostname, port, upstream)
             return self.download_proxy.start()
         except (OSError, ValueError, RuntimeError, ProxyConfigurationError) as error:
