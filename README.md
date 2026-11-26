@@ -67,7 +67,7 @@ ZIP and 7z use the installed **7-Zip command-line executable**. GitArchive does 
 
 Compression levels map to 7-Zip levels 1 / 5 / 9 (fastest / normal / ultra). The 7z mode uses LZMA2 with a 16 / 32 / 64 MiB dictionary cap, and both formats use one compression thread. Compressed synchronization is serialized so it does not compete with other repository jobs for CPU and disk bandwidth. “Maximum” is still slower and more memory-intensive than the other levels.
 
-A compressed mirror must be unpacked before Git can update it. During synchronization, free space may be needed for an additional uncompressed copy of that repository. The previous archive is left untouched until the replacement archive has been created successfully. Commit history and restore operations unpack to temporary folders and remove those folders afterward.
+A compressed mirror must be unpacked before Git can update it. During synchronization, free space may be needed for an additional uncompressed copy of that repository. The previous archive is left untouched until the replacement archive has been created successfully. When no refs changed, GitArchive leaves the compressed file untouched and skips repacking. A changed compression level triggers a repack on the next synchronization. Commit history and restore operations unpack to temporary folders and remove those folders afterward.
 
 ## Repository history and context menu
 
