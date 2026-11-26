@@ -801,7 +801,10 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_existing_mirror, restore_mirror, validate_git_url};
+    use super::{
+        compression_code, fetch_existing_mirror, restore_mirror,
+        validate_archive_entry_path, validate_git_url, valid_storage_format,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command as StdCommand;
@@ -859,6 +862,29 @@ mod tests {
         assert!(validate_git_url("https://git.example.net/team/project.git\n").is_err());
         assert!(validate_git_url("ssh://user:password@git.example.net/team/project.git").is_err());
         assert!(validate_git_url("ssh://-oProxyCommand=bad@git.example.net/team/project.git").is_err());
+    }
+
+    #[test]
+    fn accepts_only_supported_storage_and_compression_options() {
+        assert_eq!(valid_storage_format("folder").unwrap(), "folder");
+        assert_eq!(valid_storage_format("zip").unwrap(), "zip");
+        assert_eq!(valid_storage_format("7z").unwrap(), "7z");
+        assert!(valid_storage_format("rar").is_err());
+        assert_eq!(compression_code("min").unwrap(), 1);
+        assert_eq!(compression_code("medium").unwrap(), 5);
+        assert_eq!(compression_code("max").unwrap(), 9);
+        assert!(compression_code("extreme").is_err());
+    }
+
+    #[test]
+    fn compressed_archive_paths_are_confined_to_the_mirror_root() {
+        assert!(validate_archive_entry_path("mirror.git/HEAD").is_ok());
+        assert!(validate_archive_entry_path("mirror.git/objects/ab/cdef").is_ok());
+        assert!(validate_archive_entry_path("mirror.git/../outside").is_err());
+        assert!(validate_archive_entry_path("../mirror.git/HEAD").is_err());
+        assert!(validate_archive_entry_path("/mirror.git/HEAD").is_err());
+        assert!(validate_archive_entry_path("C:/mirror.git/HEAD").is_err());
+        assert!(validate_archive_entry_path("mirror.git/config:stream").is_err());
     }
 
     #[tokio::test]
