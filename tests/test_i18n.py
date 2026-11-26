@@ -52,6 +52,20 @@ class LocalizationTests(unittest.TestCase):
             "Transfer completed: owner/repo (12 MB).",
         )
 
+    def test_download_limit_settings_and_proxy_warning_are_translated(self):
+        self.assertEqual(tr("Лимит загрузки HTTPS", "en"), "HTTPS download limit")
+        self.assertEqual(tr("Без ограничений", "en"), "Unlimited")
+        self.assertEqual(tr("HTTPS download limit", "ru"), "Лимит загрузки HTTPS")
+        warning = tr(
+            "Ограничение скорости не удалось включить; синхронизация продолжится без него: {}",
+            "en",
+        )
+        self.assertEqual(
+            warning.format("Unsupported upstream proxy URL scheme"),
+            "Could not enable the bandwidth limit; synchronization will continue without it: "
+            "Unsupported upstream proxy URL scheme",
+        )
+
     def test_heartbeat_text_is_translated_before_formatting(self):
         template = tr("Синхронизация всё ещё выполняется. Прошло {} с; новых данных от Git нет {} с.", "en")
         self.assertEqual(
