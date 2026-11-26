@@ -62,13 +62,16 @@ def apply_memory_priority_to_handle(handle, priority: str | None) -> bool:
     setter = kernel32.SetProcessInformation
     setter.argtypes = [
         wintypes.HANDLE,
-        wintypes.INT,
+        ctypes.c_int,
         ctypes.POINTER(MemoryPriorityInformation),
         wintypes.DWORD,
     ]
     setter.restype = wintypes.BOOL
     info = MemoryPriorityInformation(value)
-    process_handle = wintypes.HANDLE(getattr(handle, "value", handle))
+    raw_handle = getattr(handle, "value", None)
+    if raw_handle is None:
+        raw_handle = int(handle)
+    process_handle = wintypes.HANDLE(raw_handle)
     return bool(setter(
         process_handle,
         PROCESS_MEMORY_PRIORITY_CLASS,
