@@ -1803,7 +1803,7 @@ class GitArchiveWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def sync_one(self, repo_id: str) -> None:
-        if repo_id in self.processes or repo_id in self.queue or repo_id in self.sync_batch_repo_ids:
+        if repo_id in self.processes or repo_id in self.queue:
             return
         if not self.core.is_file():
             QMessageBox.warning(self, tr("Rust-движок не найден"), tr("Запусти start.bat: он соберёт Rust-движок и откроет приложение."))
@@ -1816,6 +1816,8 @@ class GitArchiveWindow(QMainWindow):
             self.sync_progress.clear()
             self.sync_batch_repo_ids.clear()
             self.sync_batch_failed_ids.clear()
+        elif repo_id in self.sync_batch_repo_ids:
+            return
         self.sync_batch_repo_ids.add(repo_id)
         self.queue.append(repo_id)
         self.sync_batch_total += 1
