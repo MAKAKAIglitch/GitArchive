@@ -263,7 +263,12 @@ async fn sync_compressed_mirror(
 
     println!("INFO: Repacking the updated mirror as {format} (single-threaded).");
     let temporary_archive = temporary_archive_path(destination, format);
-    create_compressed_archive(&seven_zip, &stage.path, &temporary_archive, format, level).await?;
+    if let Err(error) =
+        create_compressed_archive(&seven_zip, &stage.path, &temporary_archive, format, level).await
+    {
+        let _ = fs::remove_file(&temporary_archive);
+        return Err(error);
+    }
     if !temporary_archive.is_file() || temporary_archive.metadata()?.len() == 0 {
         let _ = fs::remove_file(&temporary_archive);
         bail!("7-Zip did not produce a valid non-empty archive.");
@@ -338,7 +343,9 @@ async fn materialize_mirror(
     .await;
 
     if result.is_err() {
-        let _ = fs::remove_dir_all(destination);
+        // The destination may be a user-supplied empty directory. Remove only
+        // the extraction subtree created by this operation, not its parent.
+        let _ = fs::remove_dir_all(destination.join("mirror.git"));
     }
     result
 }
@@ -508,9 +515,14 @@ fn promote_archive(temporary: &Path, destination: &Path) -> Result<()> {
     }
 
     if backup.is_file() {
-        fs::remove_file(&backup).with_context(|| {
-            format!("The new archive is ready, but old backup cleanup failed: {}", backup.display())
-        })?;
+        if let Err(error) = fs::remove_file(&backup) {
+            eprintln!(
+                "WARNING: New archive is ready, but old backup cleanup failed ({}): {error}",
+                backup.display()
+            );
+            // Keep the backup. recover_archive_backup() will clean it up on
+            // the next sync after confirming that the destination exists.
+        }
     }
     Ok(())
 }
@@ -594,7 +606,6 @@ async fn validate_archive_paths(seven_zip: &Path, archive: &Path) -> Result<()> 
 
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut after_separator = false;
-    let mut skipped_archive_path = false;
     let mut entry_count = 0usize;
 
     for line in listing.lines() {
@@ -612,16 +623,15 @@ async fn validate_archive_paths(seven_zip: &Path, archive: &Path) -> Result<()> 
             bail!("The compressed archive contains a link entry; extraction was refused.");
         }
         if let Some(raw_path) = line.strip_prefix("Path = ") {
-            if !skipped_archive_path {
-                skipped_archive_path = true;
-                continue;
-            }
+            // The archive filename is listed before the separator. Every Path
+            // after it is an archive member and must be checked, including the
+            // first entry (which may be the mirror.git directory itself).
             validate_archive_entry_path(raw_path)?;
             entry_count += 1;
         }
     }
 
-    if !skipped_archive_path || entry_count == 0 {
+    if entry_count == 0 {
         bail!("The archive is empty or its file list could not be validated.");
     }
     Ok(())
