@@ -56,6 +56,8 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
             raise ValueError("В ссылке должны быть адрес сервера и путь к репозиторию.")
         if parsed.password is not None or (parsed.scheme == "https" and parsed.username is not None):
             raise ValueError("Не вставляй пароль или токен прямо в URL. Используй Git Credential Manager или SSH-ключ.")
+        if parsed.scheme == "ssh" and parsed.username is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", parsed.username):
+            raise ValueError("В SSH-ссылке недопустимое имя пользователя.")
         if parsed.query or parsed.fragment:
             raise ValueError("Удали параметры после ? или # и вставь чистую ссылку на репозиторий.")
 
