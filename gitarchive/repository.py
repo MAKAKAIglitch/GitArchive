@@ -121,6 +121,43 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
     return normalized, namespace, name, host_key, provider
 
 
+
+def parse_repository_url(value: str) -> tuple[str, str, str, str]:
+    """Return normalized clone URL, host key, namespace and repository name."""
+    url, namespace, name, host, _provider = parse_git_url(value)
+    return url, host, namespace, name
+
+
+def provider_name(host: str) -> str:
+    """Return a friendly provider label without requiring provider-specific APIs."""
+    hostname = host.split(":", 1)[0].strip("[]").lower()
+    if hostname in {"github.com", "www.github.com"}:
+        return "GitHub"
+    if hostname == "gitlab.com":
+        return "GitLab"
+    if hostname == "codeberg.org":
+        return "Codeberg"
+    if hostname == "bitbucket.org":
+        return "Bitbucket"
+    if hostname == "git.sr.ht":
+        return "SourceHut"
+    return "Свой Git-сервер"
+
+
+def safe_path_part(value: str) -> str:
+    """Validate one user-controlled namespace or repository path component."""
+    if not _SAFE_COMPONENT.fullmatch(value or "") or value in {".", ".."}:
+        raise ValueError("В пути репозитория есть недопустимые символы.")
+    return value
+
+
+def storage_key(host: str) -> str:
+    """Convert a host (including an optional port) into one safe folder name."""
+    key = re.sub(r"[^A-Za-z0-9.-]+", "_", host.lower()).strip("._")
+    if not key:
+        raise ValueError("Некорректное имя Git-сервера.")
+    return key
+
 def parse_github_url(value: str) -> tuple[str, str, str]:
     """Backward-compatible GitHub-only parser for existing integrations."""
     url, namespace, name, host, _provider = parse_git_url(value)
