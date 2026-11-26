@@ -64,6 +64,24 @@ def save_config(config: dict) -> None:
     temporary.replace(path)
 
 
+class SizeSignals(QObject):
+    completed = Signal(dict)
+
+
+class SizeScan(QRunnable):
+    def __init__(self, repositories: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.repositories = repositories
+        self.signals = SizeSignals()
+
+    def run(self) -> None:
+        result = {
+            repo_id: folder_size(Path(path))
+            for repo_id, path in self.repositories
+        }
+        self.signals.completed.emit(result)
+
+
 def windows_dark_theme() -> bool:
     if sys.platform != "win32":
         return True
