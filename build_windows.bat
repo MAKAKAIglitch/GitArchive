@@ -23,14 +23,12 @@ exit /b %BUILD_EXIT%
 :build_inner
 title GitArchive - Windows build
 
+set "PYTHON_CMD=python"
 where py >nul 2>nul
+if not errorlevel 1 set "PYTHON_CMD=py -3"
+%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)"
 if errorlevel 1 (
-    echo [ERROR] Python launcher was not found. Install Python 3.11+.
-    exit /b 1
-)
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)"
-if errorlevel 1 (
-    echo [ERROR] Python 3.11 or newer is required.
+    echo [ERROR] Python 3.11+ was not found. Ensure py.exe or python.exe is in PATH.
     exit /b 1
 )
 where cargo >nul 2>nul
@@ -50,7 +48,7 @@ if not exist "assets\GitArchive.svg" (
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    py -3 -m venv .venv
+    %PYTHON_CMD% -m venv .venv
     if errorlevel 1 exit /b 1
 )
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt -r requirements-build.txt
