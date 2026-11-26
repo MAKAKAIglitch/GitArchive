@@ -58,16 +58,16 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 
 ## Data locations
 
-Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. New mirrors are stored under the folder configured in Settings. Mirrors are separated by host and namespace so repositories with the same owner/project path on different servers do not collide.
+Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. New mirrors are stored under the folder configured in Settings. GitHub mirrors retain the original `<storage>/<owner>/<repo>.git` layout for compatibility. Other hosts are stored under `<storage>/_custom/<host>/<namespace>/<repo>.git`, so identical project paths on different servers do not collide.
 
 A mirror is a standard bare Git repository. In the desktop app, select a repository and choose **Restore working copy**. The restore command creates a separate working folder and also fetches the preserved historical refs; it never overwrites an existing destination or changes the source archive.
 
 You can also restore it manually:
 
 ```powershell
-git --git-dir "$HOME\GitArchive\github.com\owner\repo.git" show-ref
-git clone "$HOME\GitArchive\github.com\owner\repo.git" ".\repo-restored"
-git -C ".\repo-restored" fetch --no-tags --force "$HOME\GitArchive\github.com\owner\repo.git" "+refs/gitarchive/snapshots/*:refs/gitarchive/snapshots/*"
+git --git-dir "$HOME\GitArchive\owner\repo.git" show-ref
+git clone "$HOME\GitArchive\owner\repo.git" ".\repo-restored"
+git -C ".\repo-restored" fetch --no-tags --force "$HOME\GitArchive\owner\repo.git" "+refs/gitarchive/snapshots/*:refs/gitarchive/snapshots/*"
 ```
 
 ## Archive boundaries and storage limit
