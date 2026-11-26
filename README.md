@@ -110,7 +110,7 @@ Install Python 3.11+, Rust stable, Git for Windows, and (for the installer) Inno
 build_windows.bat
 ```
 
-The script generates the Windows multi-resolution icon from the source SVG, builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Every build run captures standard output and errors in a timestamped \`yyyy-MM-dd_HH-mm-ss.log\` file in the same directory as \`build_windows.bat\`; the script prints the captured log when the build ends and returns the original build exit code. The log files are ignored by Git. Outputs:
+The script runs the Python unit tests and Rust integration tests first, generates the Windows multi-resolution icon from the source SVG, builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Every build run captures standard output and errors in a timestamped \`yyyy-MM-dd_HH-mm-ss.log\` file in the same directory as \`build_windows.bat\`; the script prints the captured log when the build ends and returns the original build exit code. The log files are ignored by Git. Outputs:
 
 - Portable application: `dist\\GitArchive\\GitArchive.exe` plus its adjacent runtime files.
 - Installer: `dist-installer\\GitArchive-Setup.exe` (when Inno Setup is installed).
