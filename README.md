@@ -112,7 +112,19 @@ Git for Windows remains a runtime dependency and is not bundled. The installer i
 
 ## LAN and ZeroTier peer exchange
 
-Peer-to-peer archive exchange is **not implemented yet**. Its security and protocol requirements are documented in [docs/NETWORK_SYNC_DESIGN.md](docs/NETWORK_SYNC_DESIGN.md). The design requires opt-in sharing, mutual TLS 1.3, pinned peer identities, explicit import approval, staging, and `git fsck --full --strict` before an archive is promoted. It will not trust a peer solely because it is on the same LAN or ZeroTier network.
+The first LAN / ZeroTier transfer implementation is available from **Repositories → LAN / ZeroTier**. ZeroTier does not need a special API or SDK: GitArchive enumerates the operating system's network interfaces with \`psutil\` and treats a ZeroTier virtual adapter like Wi-Fi or Ethernet.
+
+- Discovery is started manually. It probes private IPv4 subnets attached to the computer's interfaces, including eligible ZeroTier / overlay interfaces. It scans only networks with at most 512 addresses (\`/23\` or smaller); larger networks can be used by entering the peer's private IP manually. Public Internet addresses are not scanned or accepted as peer endpoints.
+- A device must explicitly enable **Принимать подключения**. The listener binds to the computer's private interface addresses on the selected TCP port (default \`47652\`); it is not opened automatically at app startup. Windows Firewall may ask whether to allow the app on the relevant private network.
+- First pairing uses a one-time high-entropy code generated on the receiving device. It expires after 10 minutes and is consumed once. The discovered certificate fingerprint is checked when a device was selected from the scan list.
+- After pairing, transfers use TLS 1.3 with mutual certificate authentication and pinned peer certificates. Removing a device from the paired list revokes its trust on this computer. Both computers must trust each other for later transfer attempts to succeed in both directions.
+- Discovery reveals only a peer ID and certificate fingerprint; it does not request repository names, paths, or archive contents.
+- The sender exports a standard Git bundle from a bare folder mirror (\`.git\`) and sends it to the paired peer. The bundle is limited to 20 GiB and protected by a SHA-256 check. ZIP and 7z source archives are not yet directly supported for sending; use folder storage for repositories you want to transfer.
+- Received bundles are stored in the local incoming area under the app-data directory. They do not enter the main archive automatically. Select **Проверить и импортировать** to verify the bundle, clone it into a temporary mirror, run \`git fsck --full --strict\`, and then approve the import.
+- When the same repository already exists as a folder mirror, incoming refs are placed in \`refs/gitarchive/peers/<peer-id>/<timestamp>/\`; normal local branches and tags are not replaced. For an existing ZIP/7z archive, the imported folder mirror is created alongside the compressed file; the old compressed file is preserved.
+- The receiving computer needs enough free space for the incoming bundle and temporary verification mirror. At most two incoming transfers are accepted concurrently.
+
+This is an early implementation, not yet a fully tested release. It currently supports private IPv4 discovery and folder mirrors; IPv6 discovery, automatic subnet discovery for very large overlay networks, incremental object-only transfer, compressed archive transfer, and transfer progress reporting remain future work. See [docs/NETWORK_SYNC_DESIGN.md](docs/NETWORK_SYNC_DESIGN.md) for protocol and limitations.
 
 ## Run on Windows
 

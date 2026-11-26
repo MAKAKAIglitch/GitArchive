@@ -50,7 +50,7 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto :failed
 )
 
-".venv\Scripts\python.exe" -c "import PySide6; v=tuple(map(int,PySide6.__version__.split('.')[:2])); raise SystemExit(0 if (6,8) <= v < (7,0) else 1)" >nul 2>nul
+".venv\Scripts\python.exe" -c "import PySide6, cryptography, psutil; v=tuple(map(int,PySide6.__version__.split('.')[:2])); c=tuple(map(int,cryptography.__version__.split('.')[:2])); p=tuple(map(int,psutil.__version__.split('.')[:2])); raise SystemExit(0 if (6,8) <= v < (7,0) and (45,0) <= c < (51,0) and (7,0) <= p < (8,0) else 1)" >nul 2>nul
 if errorlevel 1 (
     echo [SETUP] Installing or updating Python dependencies...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt

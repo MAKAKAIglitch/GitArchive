@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from .priority import (
     normalize_memory_priority,
     process_creation_flags,
 )
+from .lan import DEFAULT_PORT, LanPeerService, discover_local_peers, import_incoming_bundle
 
 from PySide6.QtSvg import QSvgRenderer
 
@@ -435,6 +437,416 @@ class CommitHistoryDialog(QDialog):
             self.details.append(f"\nОшибка экспорта: {stderr or stdout}")
 
 
+class LanTaskSignals(QObject):
+    completed = Signal(object, object)
+    failed = Signal(object, str)
+
+
+class LanTask(QRunnable):
+    def __init__(self, callback, *args) -> None:
+        super().__init__()
+        self.callback = callback
+        self.args = args
+        self.signals = LanTaskSignals()
+
+    def run(self) -> None:
+        try:
+            self.signals.completed.emit(self, self.callback(*self.args))
+        except Exception as error:
+            self.signals.failed.emit(self, str(error))
+
+
+class LanPeerDialog(QDialog):
+    """Small control panel for explicit LAN/overlay pairing and Git bundle exchange."""
+
+    def __init__(self, window: "GitArchiveWindow") -> None:
+        super().__init__(window)
+        self.window = window
+        self.service = window.lan_service
+        self.tasks: set[LanTask] = set()
+        self.task_callbacks: dict[LanTask, object] = {}
+        self.expected_fingerprint: str | None = None
+        self.setWindowTitle("LAN / ZeroTier — GitArchive")
+        self.resize(860, 760)
+        self.setMinimumSize(720, 620)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Обмен архивами между устройствами в одной локальной сети или виртуальной сети. "
+            "ZeroTier используется как обычный сетевой адаптер — отдельная интеграция не нужна."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        layout.addWidget(intro)
+
+        listener_row = QHBoxLayout()
+        self.listen = QCheckBox("Принимать подключения")
+        self.listen.setChecked(self.service.is_running)
+        self.port = QSpinBox()
+        self.port.setRange(1024, 65535)
+        self.port.setValue(self.service.port if self.service.is_running else DEFAULT_PORT)
+        self.port.setFixedWidth(110)
+        self.listener_status = QLabel("Приём включён" if self.service.is_running else "Приём выключен")
+        self.listener_status.setObjectName("Muted")
+        listener_row.addWidget(self.listen)
+        listener_row.addWidget(QLabel("Порт"))
+        listener_row.addWidget(self.port)
+        listener_row.addStretch(1)
+        listener_row.addWidget(self.listener_status)
+        layout.addLayout(listener_row)
+        self.listen.toggled.connect(self.toggle_listener)
+
+        self.local_addresses = QLabel(self._listener_address_text())
+        self.local_addresses.setWordWrap(True)
+        self.local_addresses.setObjectName("Muted")
+        layout.addWidget(self.local_addresses)
+
+        code_row = QHBoxLayout()
+        self.local_code = QLineEdit()
+        self.local_code.setReadOnly(True)
+        self.local_code.setPlaceholderText("Одноразовый код появится здесь")
+        make_code = QPushButton("Создать код")
+        make_code.setObjectName("Secondary")
+        make_code.clicked.connect(self.make_pairing_code)
+        copy_code = QPushButton("Копировать")
+        copy_code.setObjectName("Secondary")
+        copy_code.clicked.connect(lambda: QApplication.clipboard().setText(self.local_code.text()))
+        code_row.addWidget(self.local_code, 1)
+        code_row.addWidget(make_code)
+        code_row.addWidget(copy_code)
+        layout.addLayout(code_row)
+
+        discovery_row = QHBoxLayout()
+        discover = QPushButton("Найти устройства в локальных сетях")
+        discover.setObjectName("Accent")
+        discover.clicked.connect(self.discover)
+        discovery_row.addWidget(discover)
+        discovery_row.addStretch(1)
+        layout.addLayout(discovery_row)
+
+        self.discovered = QListWidget()
+        self.discovered.setMaximumHeight(115)
+        self.discovered.itemClicked.connect(self.select_discovered)
+        layout.addWidget(self.discovered)
+
+        pair_form = QFormLayout()
+        self.remote_address = QLineEdit()
+        self.remote_address.setPlaceholderText("IP найденного устройства, например 192.168.1.20 или 10.x.x.x")
+        self.remote_port = QSpinBox()
+        self.remote_port.setRange(1024, 65535)
+        self.remote_port.setValue(DEFAULT_PORT)
+        self.remote_code = QLineEdit()
+        self.remote_code.setEchoMode(QLineEdit.EchoMode.Password)
+        self.remote_code.setPlaceholderText("Одноразовый код с принимающего устройства")
+        pair_form.addRow("Адрес устройства", self.remote_address)
+        pair_form.addRow("Порт", self.remote_port)
+        pair_form.addRow("Код сопряжения", self.remote_code)
+        layout.addLayout(pair_form)
+        pair_row = QHBoxLayout()
+        pair_button = QPushButton("Сопрячь устройство")
+        pair_button.setObjectName("Accent")
+        pair_button.clicked.connect(self.pair)
+        pair_row.addWidget(pair_button)
+        pair_row.addStretch(1)
+        layout.addLayout(pair_row)
+
+        layout.addWidget(QLabel("Сопряжённые устройства"))
+        self.paired = QListWidget()
+        self.paired.setMaximumHeight(105)
+        self.paired.currentItemChanged.connect(self.update_send_state)
+        layout.addWidget(self.paired)
+        revoke_row = QHBoxLayout()
+        self.revoke_button = QPushButton("Удалить доверие к выбранному устройству")
+        self.revoke_button.setObjectName("Secondary")
+        self.revoke_button.clicked.connect(self.forget_selected_peer)
+        revoke_row.addWidget(self.revoke_button)
+        revoke_row.addStretch(1)
+        layout.addLayout(revoke_row)
+
+        send_row = QHBoxLayout()
+        self.repository = QComboBox()
+        self.repository.setMinimumWidth(260)
+        self.send_button = QPushButton("Передать выбранный архив")
+        self.send_button.setObjectName("Accent")
+        self.send_button.clicked.connect(self.send_selected)
+        send_row.addWidget(self.repository, 1)
+        send_row.addWidget(self.send_button)
+        layout.addLayout(send_row)
+        format_note = QLabel(
+            "В первой версии передача поддерживает папки .git. ZIP/7z можно будет подключить "
+            "после отдельного этапа распаковки и упаковки; исходные сжатые архивы не изменяются."
+        )
+        format_note.setWordWrap(True)
+        format_note.setObjectName("Muted")
+        layout.addWidget(format_note)
+
+        layout.addWidget(QLabel("Полученные архивы — сначала проверяются, затем импортируются вручную"))
+        self.incoming = QListWidget()
+        self.incoming.setMaximumHeight(125)
+        layout.addWidget(self.incoming)
+        import_row = QHBoxLayout()
+        import_button = QPushButton("Проверить и импортировать")
+        import_button.setObjectName("Accent")
+        import_button.clicked.connect(self.import_selected)
+        refresh_button = QPushButton("Обновить")
+        refresh_button.setObjectName("Secondary")
+        refresh_button.clicked.connect(self.refresh_lists)
+        import_row.addWidget(import_button)
+        import_row.addWidget(refresh_button)
+        import_row.addStretch(1)
+        layout.addLayout(import_row)
+
+        self.status = QLabel("Обнаружение работает только по нажатию кнопки.")
+        self.status.setWordWrap(True)
+        self.status.setObjectName("Muted")
+        layout.addWidget(self.status)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setObjectName("Secondary")
+        close_button.clicked.connect(self.accept)
+        close_row.addWidget(close_button)
+        layout.addLayout(close_row)
+
+        self.refresh_lists()
+        self.incoming_timer = QTimer(self)
+        self.incoming_timer.setInterval(2500)
+        self.incoming_timer.timeout.connect(self.refresh_incoming)
+        self.incoming_timer.start()
+
+    def _listener_address_text(self) -> str:
+        if not self.service.is_running:
+            return "Приём выключен. Включи его только на тех устройствах, которые должны получать архивы."
+        return "Адреса приёма: " + ", ".join(
+            f"{address}:{self.service.port}" for address in self.service.local_addresses()
+        )
+
+    def toggle_listener(self, enabled: bool) -> None:
+        try:
+            if enabled:
+                addresses = self.service.start(self.port.value())
+                self.listener_status.setText("Приём включён")
+                self.port.setEnabled(False)
+                self.status.setText("GitArchive слушает только частные IPv4-адреса сетевых интерфейсов.")
+                self.local_addresses.setText("Адреса приёма: " + ", ".join(
+                    f"{address}:{self.service.port}" for address in addresses
+                ))
+            else:
+                self.service.stop()
+                self.local_code.clear()
+                self.listener_status.setText("Приём выключен")
+                self.port.setEnabled(True)
+                self.local_addresses.setText(self._listener_address_text())
+                self.status.setText("Приём подключений остановлен.")
+        except Exception as error:
+            self.listen.blockSignals(True)
+            self.listen.setChecked(False)
+            self.listen.blockSignals(False)
+            self.port.setEnabled(True)
+            QMessageBox.warning(self, "LAN-приём не запущен", str(error))
+
+    def make_pairing_code(self) -> None:
+        try:
+            code = self.service.issue_pairing_code()
+        except Exception as error:
+            QMessageBox.warning(self, "Не удалось создать код", str(error))
+            return
+        self.local_code.setText(code)
+        QApplication.clipboard().setText(code)
+        self.status.setText("Код скопирован. Он действует 10 минут и используется один раз.")
+
+    def start_task(self, callback, done, *args) -> None:
+        task = LanTask(callback, *args)
+        self.tasks.add(task)
+        self.task_callbacks[task] = done
+        task.signals.completed.connect(self._task_completed)
+        task.signals.failed.connect(self._task_failed)
+        self.window.thread_pool.start(task)
+
+    def _task_completed(self, task: LanTask, result) -> None:
+        self.tasks.discard(task)
+        callback = self.task_callbacks.pop(task, None)
+        if callback:
+            callback(result)
+
+    def _task_failed(self, task: LanTask, message: str) -> None:
+        self.tasks.discard(task)
+        self.task_callbacks.pop(task, None)
+        self.status.setText("Ошибка: " + message)
+        QMessageBox.warning(self, "LAN / ZeroTier", message)
+
+    def discover(self) -> None:
+        self.discovered.clear()
+        self.status.setText("Идёт поиск по подключённым частным IPv4-подсетям…")
+        self.start_task(discover_local_peers, self.discovery_finished, self.port.value())
+
+    def discovery_finished(self, peers: list[dict[str, str]]) -> None:
+        self.discovered.clear()
+        for peer in peers:
+            self.service.refresh_peer_endpoint(
+                peer["peer_id"], peer["address"], int(peer["port"]), peer["fingerprint"]
+            )
+            item = QListWidgetItem(
+                f"{peer['address']}:{peer['port']}  ·  {peer['peer_id'][:8]}  ·  SHA-256 {peer['fingerprint'][:16]}…"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, peer)
+            self.discovered.addItem(item)
+        self.refresh_lists()
+        self.status.setText(
+            f"Найдено устройств: {len(peers)}. Репозитории и их названия при поиске не передаются."
+        )
+
+    def select_discovered(self, item: QListWidgetItem) -> None:
+        peer = item.data(Qt.ItemDataRole.UserRole) or {}
+        self.remote_address.setText(str(peer.get("address", "")))
+        self.remote_port.setValue(int(peer.get("port", DEFAULT_PORT)))
+        self.expected_fingerprint = str(peer.get("fingerprint", "")) or None
+
+    def pair(self) -> None:
+        address = self.remote_address.text().strip()
+        code = self.remote_code.text().strip()
+        if not address or not code:
+            QMessageBox.information(self, "Сопряжение", "Укажи IP-адрес и одноразовый код с принимающего устройства.")
+            return
+        port = self.remote_port.value()
+        expected = self.expected_fingerprint
+        self.status.setText("Проверяется сертификат и выполняется сопряжение…")
+        self.start_task(
+            self.service.pair_with_peer,
+            self.pair_finished,
+            address, port, code, expected,
+        )
+
+    def pair_finished(self, peer: dict[str, Any]) -> None:
+        self.remote_code.clear()
+        self.status.setText(
+            f"Устройство {peer['peer_id']} сопряжено. SHA-256: {peer['fingerprint']}"
+        )
+        self.refresh_lists()
+
+    def refresh_lists(self) -> None:
+        selected = self.paired.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        self.paired.clear()
+        for peer in self.service.peers():
+            endpoint = f"{peer['address']}:{peer['port']}" if peer.get("address") else "адрес не сохранён"
+            item = QListWidgetItem(
+                f"{peer['peer_id'][:8]}  ·  {endpoint}  ·  {peer['fingerprint'][:16]}…"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, peer["peer_id"])
+            self.paired.addItem(item)
+            if peer["peer_id"] == selected_id:
+                self.paired.setCurrentItem(item)
+        self.repository.clear()
+        for repo in self.window.config.get("repositories", []):
+            if repository_storage_format(repo) == "folder":
+                self.repository.addItem(repository_label(repo), repo.get("id"))
+        self.refresh_incoming()
+        self.update_send_state()
+
+    def forget_selected_peer(self) -> None:
+        item = self.paired.currentItem()
+        if not item:
+            return
+        peer_id = str(item.data(Qt.ItemDataRole.UserRole))
+        answer = QMessageBox.question(
+            self,
+            "Удалить доверенное устройство",
+            "GitArchive перестанет принимать передачи с этого устройства и отправлять ему архивы. "
+            "Локальные репозитории не удаляются. Для повторного обмена потребуется новое сопряжение.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.service.forget_peer(peer_id)
+        self.refresh_lists()
+        self.status.setText("Доверие к устройству отозвано.")
+
+    def update_send_state(self, *_args) -> None:
+        has_peer = self.paired.currentItem() is not None
+        has_repo = self.repository.currentData() is not None
+        self.send_button.setEnabled(has_peer and has_repo)
+        self.revoke_button.setEnabled(has_peer)
+
+    def send_selected(self) -> None:
+        item = self.paired.currentItem()
+        repo_id = self.repository.currentData()
+        peer_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        repo = next((entry for entry in self.window.config["repositories"] if entry.get("id") == repo_id), None)
+        if not peer_id or not repo:
+            return
+        self.status.setText(f"Создаётся Git bundle и отправляется {repository_label(repo)}…")
+        self.start_task(self.service.send_bundle, self.send_finished, peer_id, dict(repo))
+
+    def send_finished(self, result: dict[str, Any]) -> None:
+        self.status.setText(
+            f"Передача завершена: {result['repository']['namespace']}/{result['repository']['name']} "
+            f"({human_size(int(result['size']))})."
+        )
+
+    def refresh_incoming(self) -> None:
+        selected = self.incoming.currentItem()
+        selected_path = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        self.incoming.clear()
+        for item in self.service.list_incoming():
+            repo = item.get("repository") or {}
+            text = (
+                f"{repo.get('namespace', '')}/{repo.get('name', 'неизвестный репозиторий')}  ·  "
+                f"{human_size(int(item.get('size', 0)))}  ·  {item.get('received_at', '')}"
+            )
+            row = QListWidgetItem(text)
+            row.setData(Qt.ItemDataRole.UserRole, item["bundle_path"])
+            self.incoming.addItem(row)
+            if item["bundle_path"] == selected_path:
+                self.incoming.setCurrentItem(row)
+
+    def import_selected(self) -> None:
+        item = self.incoming.currentItem()
+        if not item:
+            QMessageBox.information(self, "Входящие архивы", "Выбери полученный bundle.")
+            return
+        path = str(item.data(Qt.ItemDataRole.UserRole))
+        self.status.setText("Проверяется Git bundle и целостность объектов…")
+        existing = [dict(repo) for repo in self.window.config.get("repositories", [])]
+        self.start_task(
+            import_incoming_bundle,
+            self.import_finished,
+            path,
+            self.window.config["storage_path"],
+            existing,
+        )
+
+    def import_finished(self, entry: dict[str, Any]) -> None:
+        repositories = self.window.config.setdefault("repositories", [])
+        index = next((
+            i for i, current in enumerate(repositories)
+            if current.get("host") == entry.get("host")
+            and current.get("namespace") == entry.get("namespace")
+            and current.get("name") == entry.get("name")
+        ), None)
+        if index is None:
+            repositories.append(entry)
+        else:
+            repositories[index] = entry
+        save_config(self.window.config)
+        self.window.refresh()
+        self.window.scan_sizes()
+        self.window.log(f"Импортировано из LAN: {repository_label(entry)}")
+        self.refresh_lists()
+        self.status.setText(f"Импортировано: {repository_label(entry)}. Локальные ветки не перезаписывались.")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "incoming_timer") and not self.incoming_timer.isActive():
+            self.incoming_timer.start()
+
+    def closeEvent(self, event) -> None:
+        self.incoming_timer.stop()
+        super().closeEvent(event)
+
+
 class SizeSignals(QObject):
     completed = Signal(dict)
 
@@ -510,11 +922,18 @@ class GitArchiveWindow(QMainWindow):
         self.restore_destination: Path | None = None
         self.queue: list[str] = []
         self.logs: list[str] = self.load_logs()
+        self.pending_log_lines: list[str] = []
+        self.log_flush_timer = QTimer(self)
+        self.log_flush_timer.setSingleShot(True)
+        self.log_flush_timer.setInterval(100)
+        self.log_flush_timer.timeout.connect(self.flush_logs)
         self.size_cache: dict[str, int] = {}
         self.size_scan_running = False
         self.size_scan_ready = False
         self.size_worker: SizeScan | None = None
         self.thread_pool = QThreadPool.globalInstance()
+        self.lan_service = LanPeerService(data_dir())
+        self.lan_dialog: LanPeerDialog | None = None
         self.history_workers: list[GitCommand] = []
         self.seven_zip_path = find_7zip()
         self.sync_batch_total = 0
@@ -702,6 +1121,10 @@ class GitArchiveWindow(QMainWindow):
             button.setObjectName(name)
             button.clicked.connect(callback)
             bar.addWidget(button)
+        lan_button = QPushButton("LAN / ZeroTier")
+        lan_button.setObjectName("Secondary")
+        lan_button.clicked.connect(self.open_lan_dialog)
+        bar.addWidget(lan_button)
         bar.addStretch(1)
         r.addLayout(bar)
         self.repo_table = self.make_table()
@@ -716,6 +1139,7 @@ class GitArchiveWindow(QMainWindow):
         self.log_view.setObjectName("Log")
         self.log_view.setPlaceholderText("События синхронизации появятся здесь.")
         self.log_view.setPlainText("\n".join(self.logs))
+        self.log_view.document().setMaximumBlockCount(1200)
         self.log_view.moveCursor(QTextCursor.MoveOperation.End)
         a.addWidget(self.log_view)
         self.pages.addWidget(activity)
@@ -928,10 +1352,14 @@ class GitArchiveWindow(QMainWindow):
             self.hide()
             self.tray.showMessage(APP_NAME, "GitArchive продолжает работу в системном трее.", QSystemTrayIcon.MessageIcon.Information, 2500)
         else:
+            self.flush_logs()
+            self.lan_service.stop()
             event.accept()
 
     def exit_app(self) -> None:
         self.allow_exit = True
+        self.flush_logs()
+        self.lan_service.stop()
         for process in list(self.processes.values()):
             if process.state() != QProcess.ProcessState.NotRunning:
                 process.terminate()
@@ -939,6 +1367,14 @@ class GitArchiveWindow(QMainWindow):
             self.restore_process.terminate()
         self.tray.hide()
         QApplication.quit()
+
+    def open_lan_dialog(self) -> None:
+        if self.lan_dialog is None:
+            self.lan_dialog = LanPeerDialog(self)
+        self.lan_dialog.refresh_lists()
+        self.lan_dialog.show()
+        self.lan_dialog.raise_()
+        self.lan_dialog.activateWindow()
 
     def add_repository(self) -> None:
         prompt = (
@@ -1620,8 +2056,16 @@ class GitArchiveWindow(QMainWindow):
         line = f"[{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
         self.logs.append(line)
         self.logs = self.logs[-1200:]
+        self.pending_log_lines.append(line)
+        if not self.log_flush_timer.isActive():
+            self.log_flush_timer.start()
 
-        # Keep one small rotated log locally; no telemetry or remote uploads.
+    def flush_logs(self) -> None:
+        if self.log_flush_timer.isActive():
+            self.log_flush_timer.stop()
+        if not self.pending_log_lines:
+            return
+        pending, self.pending_log_lines = self.pending_log_lines, []
         try:
             log_dir = data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -1631,13 +2075,17 @@ class GitArchiveWindow(QMainWindow):
                 rotated.unlink(missing_ok=True)
                 log_path.replace(rotated)
             with log_path.open("a", encoding="utf-8") as stream:
-                stream.write(line + "\n")
+                stream.write("\n".join(pending) + "\n")
         except OSError:
             pass
 
         if hasattr(self, "log_view"):
-            self.log_view.setPlainText("\n".join(self.logs))
-            self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+            cursor = QTextCursor(self.log_view.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText("\n".join(pending) + "\n")
+            self.log_view.setTextCursor(cursor)
+            if self.pages.currentWidget() is self.pages.widget(2):
+                self.log_view.ensureCursorVisible()
 
     def choose_storage(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Папка для новых архивов", self.storage_edit.text())
