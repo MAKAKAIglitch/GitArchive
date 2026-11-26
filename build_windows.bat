@@ -64,6 +64,10 @@ echo [TEST] Running Python unit tests before expensive packaging steps...
 ".venv\Scripts\python.exe" -m unittest discover -s tests -v
 if errorlevel 1 goto :failed
 
+echo [TEST] Running Rust mirror and branch-preservation integration tests...
+cargo test --release --manifest-path rust-core\Cargo.toml --jobs 1
+if errorlevel 1 goto :failed
+
 echo [BUILD] Generating the Windows application icon...
 ".venv\Scripts\python.exe" scripts\build_icon.py --output build\GitArchive.ico
 if errorlevel 1 goto :failed
