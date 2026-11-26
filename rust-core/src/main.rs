@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -140,7 +139,6 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
         bail!("Could not inspect existing Git refs before update.");
     }
 
-    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.6fZ").to_string();
     let refs = String::from_utf8_lossy(&output.stdout);
     let mut saved = 0usize;
 
@@ -152,7 +150,9 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
             continue;
         }
         let suffix = ref_name.strip_prefix("refs/").unwrap_or(ref_name);
-        let snapshot_ref = format!("refs/gitarchive/snapshots/{timestamp}/{suffix}");
+        // The object ID makes this snapshot idempotent: unchanged refs do not
+        // create another snapshot every ten-minute synchronization cycle.
+        let snapshot_ref = format!("refs/gitarchive/snapshots/{object_id}/{suffix}");
         let update = Command::new("git")
             .arg("-C")
             .arg(repository)
