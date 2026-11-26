@@ -959,6 +959,7 @@ class GitArchiveWindow(QMainWindow):
         self._default_https_proxy_loaded = False
         self._default_https_proxy_cache: str | None = None
         self._https_proxy_cache: dict[str, str | None] = {}
+        self._https_proxy_lookup_failed = False
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
         self.sync_batch_errors = 0
@@ -1858,6 +1859,7 @@ class GitArchiveWindow(QMainWindow):
                         self._default_https_proxy_cache = self._normalize_proxy_scheme(value)
                         break
         except subprocess.TimeoutExpired as error:
+            self._https_proxy_lookup_failed = True
             raise ProxyConfigurationError(
                 "Could not read Git proxy settings quickly enough; the limiter was skipped"
             ) from error
@@ -1899,6 +1901,7 @@ class GitArchiveWindow(QMainWindow):
                 else self._default_https_proxy()
             )
         except subprocess.TimeoutExpired as error:
+            self._https_proxy_lookup_failed = True
             raise ProxyConfigurationError(
                 "Could not resolve this remote's Git proxy settings; the limiter was skipped"
             ) from error
@@ -1911,7 +1914,7 @@ class GitArchiveWindow(QMainWindow):
     def prepare_download_proxy(self, remote_url: str) -> str | None:
         """Return the local aggregate limiter URL for HTTPS remotes only."""
         limit_mbps = normalize_download_limit(self.config.get("sync_download_limit_mbps", 3))
-        if limit_mbps <= 0:
+        if limit_mbps <= 0 or self._https_proxy_lookup_failed:
             return None
         try:
             parsed = urlsplit(remote_url)
@@ -2404,6 +2407,7 @@ class GitArchiveWindow(QMainWindow):
         self._default_https_proxy_loaded = False
         self._default_https_proxy_cache = None
         self._https_proxy_cache.clear()
+        self._https_proxy_lookup_failed = False
         if self.download_proxy is not None:
             self.download_proxy.set_limit(self.download_limit.value() * 1_000_000)
         self.sync_timer.setInterval(self.interval.value() * 60000)
