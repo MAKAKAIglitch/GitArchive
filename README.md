@@ -121,7 +121,7 @@ Git for Windows remains a runtime dependency and is not bundled. The installer i
 
 The repository includes a **manual-only** Windows installer workflow at `.github/workflows/windows-installer.yml`. It does not run on pushes, pull requests, or a schedule. It uses one Windows runner, one Cargo build job, no build matrix or cache, and uploads only the finished installer with a 7-day retention period.
 
-To create the first artifact, enable GitHub Actions for the account and repository, open **Actions → Build Windows installer → Run workflow**, and wait for the manual run to finish. Download **GitArchive-Windows-Installer** from that run's Artifacts section. The artifact contains `GitArchive-Setup.exe`. The workflow also runs the Python unit tests before uploading it; a failed build or test does not publish an installer artifact.
+To create the first artifact, enable GitHub Actions for the account and repository, open **Actions → Build Windows installer → Run workflow**, and wait for the manual run to finish. Download **GitArchive-Windows-Installer** from that run's Artifacts section. The artifact contains `GitArchive-Setup.exe`. The Windows build script runs the complete Python unit-test suite before the Rust compile and packaging steps; a failed test stops the build before the expensive steps, and no artifact is uploaded.
 
 ## LAN and ZeroTier peer exchange
 
