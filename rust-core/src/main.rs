@@ -243,7 +243,7 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::fetch_existing_mirror;
+    use super::{fetch_existing_mirror, restore_mirror};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command as StdCommand;
@@ -281,6 +281,62 @@ mod tests {
         let mut command = vec!["--git-dir".to_owned(), repo.to_string_lossy().into_owned()];
         command.extend(args.iter().map(|value| (*value).to_owned()));
         git(command)
+    }
+
+    #[tokio::test]
+    async fn restore_copies_current_branch_and_historical_snapshot_refs() {
+        let root = temp_dir();
+        let source = root.join("source.git");
+        let work = root.join("work");
+        let archive = root.join("archive.git");
+        let restored = root.join("restored");
+        fs::create_dir_all(&root).expect("create test root");
+
+        git(["init", "--bare", source.to_str().unwrap()]);
+        git([
+            "--git-dir",
+            source.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+        git(["init", "-b", "main", work.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "config", "user.name", "GitArchive Test"]);
+        git(["-C", work.to_str().unwrap(), "config", "user.email", "gitarchive-test@example.invalid"]);
+        fs::write(work.join("restore.txt"), "restore me\n").expect("write test commit");
+        git(["-C", work.to_str().unwrap(), "add", "."]);
+        git(["-C", work.to_str().unwrap(), "commit", "-m", "restore test"]);
+        let head = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(["-C", work.to_str().unwrap(), "remote", "add", "origin", source.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "push", "origin", "main"]);
+        git(["clone", "--mirror", source.to_str().unwrap(), archive.to_str().unwrap()]);
+
+        let snapshot = format!("refs/gitarchive/snapshots/{head}/heads/main");
+        git_dir(&archive, &["update-ref", &snapshot, &head]);
+
+        restore_mirror(&archive, &restored)
+            .await
+            .expect("restore should create a normal working copy");
+
+        assert_eq!(git(["-C", restored.to_str().unwrap(), "rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(["-C", restored.to_str().unwrap(), "rev-parse", &snapshot]),
+            head,
+            "the restored working copy must contain archived snapshot refs"
+        );
+
+        let second_attempt = restore_mirror(&archive, &restored).await;
+        assert!(
+            second_attempt.is_err(),
+            "restore must never overwrite an existing destination"
+        );
+        assert_eq!(
+            git(["-C", restored.to_str().unwrap(), "rev-parse", "HEAD"]),
+            head,
+            "a rejected second restore must leave the existing working copy unchanged"
+        );
+
+        fs::remove_dir_all(&root).expect("clean up test repositories");
     }
 
     #[tokio::test]
