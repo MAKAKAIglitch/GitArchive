@@ -57,7 +57,7 @@ The mirror engine archives Git repository data, not each hosting site's complete
 
 ## Storage formats and compression
 
-The **New archive format** setting applies to repositories added after the setting is saved. Existing repositories keep their recorded format; changing the setting never migrates or rewrites existing archives.
+The **New archive format** setting applies to repositories added after the setting is saved. Existing repositories keep their recorded format; changing the setting never migrates or rewrites existing archives. The compression level is a global preference for all compressed repositories and takes effect on their next synchronization.
 
 - **Folder (.git)** is the recommended default. Git fetches directly into the bare mirror, so there is no full archive extraction/repacking step and no extra archiver process.
 - **ZIP (.zip)** is broadly compatible. Updates extract the compressed mirror into a temporary folder, run Git fetch, then create a replacement ZIP.
