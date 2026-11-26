@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
-from .repository import archive_path, folder_size, human_size, parse_git_url
+from .repository import archive_path, find_7zip, folder_size, human_size, parse_git_url
 
 from PySide6.QtSvg import QSvgRenderer
 
@@ -54,6 +56,14 @@ def repository_label(repo: dict) -> str:
     return f"{namespace}/{name}  ·  {host}"
 
 
+def repository_storage_format(repo: dict) -> str:
+    configured = str(repo.get("storage_format") or "").lower()
+    if configured in {"folder", "zip", "7z"}:
+        return configured
+    suffix = Path(str(repo.get("local_path") or "")).suffix.lower()
+    return {".zip": "zip", ".7z": "7z"}.get(suffix, "folder")
+
+
 def data_dir() -> Path:
     value = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
     path = Path(value) if value else Path.home() / "AppData" / "Local" / APP_NAME
@@ -64,6 +74,8 @@ def data_dir() -> Path:
 def defaults() -> dict:
     return {
         "storage_path": str(Path.home() / "GitArchive"),
+        "new_storage_format": "folder",
+        "compression_level": "medium",
         "max_storage_gb": 100,
         "sync_interval_minutes": 10,
         "max_parallel": 3,
@@ -391,6 +403,8 @@ class GitArchiveWindow(QMainWindow):
         self.size_scan_ready = False
         self.size_worker: SizeScan | None = None
         self.thread_pool = QThreadPool.globalInstance()
+        self.history_workers: list[GitCommand] = []
+        self.seven_zip_path = find_7zip()
         self.allow_exit = False
         self.dark = True
         self.accent = "#60a5fa"
@@ -595,6 +609,38 @@ class GitArchiveWindow(QMainWindow):
         self.parallel.setRange(1, 8)
         self.parallel.setValue(int(self.config["max_parallel"]))
         form.addRow("Параллельные задачи", self.parallel)
+
+        self.storage_format = QComboBox()
+        self.storage_format.addItem("Папка .git — без сжатия", "folder")
+        self.storage_format.addItem("ZIP (.zip)", "zip")
+        self.storage_format.addItem("7z (.7z)", "7z")
+        if not self.seven_zip_path:
+            model = self.storage_format.model()
+            for index in (1, 2):
+                item = model.item(index) if hasattr(model, "item") else None
+                if item:
+                    item.setEnabled(False)
+            self.storage_format.setToolTip("Для ZIP и 7z нужен установленный 7-Zip с командной строкой. Перезапусти GitArchive после установки.")
+        saved_format = str(self.config.get("new_storage_format", "folder")).lower()
+        if saved_format not in {"folder", "zip", "7z"} or (saved_format != "folder" and not self.seven_zip_path):
+            saved_format = "folder"
+        self.storage_format.setCurrentIndex(max(0, self.storage_format.findData(saved_format)))
+        form.addRow("Формат новых архивов", self.storage_format)
+
+        self.compression_level = QComboBox()
+        self.compression_level.addItem("Минимум — быстрее", "min")
+        self.compression_level.addItem("Среднее", "medium")
+        self.compression_level.addItem("Максимум — медленнее", "max")
+        saved_level = str(self.config.get("compression_level", "medium")).lower()
+        self.compression_level.setCurrentIndex(max(0, self.compression_level.findData(saved_level)))
+        form.addRow("Сила сжатия", self.compression_level)
+        self.compression_note = QLabel()
+        self.compression_note.setObjectName("Muted")
+        self.compression_note.setWordWrap(True)
+        form.addRow("", self.compression_note)
+        self.storage_format.currentIndexChanged.connect(self.update_storage_format_controls)
+        self.update_storage_format_controls()
+
         self.theme = QComboBox()
         for label, value in (("Как в Windows", "system"), ("Светлая", "light"), ("Тёмная", "dark")):
             self.theme.addItem(label, value)
@@ -722,12 +768,18 @@ class GitArchiveWindow(QMainWindow):
             "HTTPS или SSH clone URL (GitHub, GitLab, Codeberg, Bitbucket, "
             "Gitea, Forgejo или свой сервер):"
         )
+        clipboard_value = QApplication.clipboard().text().strip()
+        try:
+            parse_git_url(clipboard_value)
+        except ValueError:
+            clipboard_value = ""
+
         value, ok = QInputDialog.getText(
             self,
             "Добавить Git-репозиторий",
             prompt,
             QLineEdit.EchoMode.Normal,
-            "https://gitlab.com/group/project.git",
+            clipboard_value,
         )
         if not ok:
             return
@@ -735,6 +787,20 @@ class GitArchiveWindow(QMainWindow):
             url, namespace, name, host, provider = parse_git_url(value)
         except ValueError as error:
             QMessageBox.warning(self, "Ссылка не распознана", str(error))
+            return
+
+        storage_format = str(self.config.get("new_storage_format", "folder")).lower()
+        compression_level = str(self.config.get("compression_level", "medium")).lower()
+        seven_zip = self.seven_zip_path or find_7zip()
+        if storage_format not in {"folder", "zip", "7z"}:
+            storage_format = "folder"
+        if storage_format != "folder" and not seven_zip:
+            QMessageBox.warning(
+                self,
+                "Нужен 7-Zip",
+                "Для хранения в ZIP или 7z установи 7-Zip и перезапусти GitArchive. "
+                "Новые репозитории пока можно сохранять в обычной папке .git.",
+            )
             return
 
         identity = (host.casefold(), namespace, name)
@@ -750,7 +816,13 @@ class GitArchiveWindow(QMainWindow):
                 )
                 return
 
-        path = archive_path(Path(self.config["storage_path"]), host, namespace, name)
+        path = archive_path(
+            Path(self.config["storage_path"]),
+            host,
+            namespace,
+            name,
+            storage_format=storage_format,
+        )
         repo = {
             "id": uuid.uuid4().hex,
             "host": host,
@@ -760,13 +832,15 @@ class GitArchiveWindow(QMainWindow):
             "name": name,
             "url": url,
             "local_path": str(path),
+            "storage_format": storage_format,
+            "compression_level": compression_level,
             "status": "В очереди",
             "last_sync": None,
             "last_error": "",
         }
         self.config["repositories"].append(repo)
         save_config(self.config)
-        self.log(f"Добавлен {repository_label(repo)}")
+        self.log(f"Добавлен {repository_label(repo)} · формат: {storage_format}")
         self.refresh()
         self.scan_sizes()
         self.sync_one(repo["id"])
@@ -803,14 +877,69 @@ class GitArchiveWindow(QMainWindow):
         if not repo:
             return
         archive = Path(repo["local_path"])
-        if not (archive / "HEAD").is_file() or not (archive / "objects").is_dir():
-            QMessageBox.information(
-                self, "Архив ещё не готов",
-                "Сначала дождись первой успешной синхронизации этого репозитория."
+        storage_format = repository_storage_format(repo)
+        if storage_format == "folder":
+            if not (archive / "HEAD").is_file() or not (archive / "objects").is_dir():
+                QMessageBox.information(
+                    self, "Архив ещё не готов",
+                    "Сначала дождись первой успешной синхронизации этого репозитория."
+                )
+                return
+            self.show_commit_history(archive, repo.get("name", "repository"))
+            return
+
+        if not archive.is_file():
+            QMessageBox.information(self, "Архив ещё не готов", "Сначала дождись первой успешной синхронизации этого репозитория.")
+            return
+        if not self.core.is_file():
+            QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat, чтобы собрать движок.")
+            return
+        seven_zip = self.seven_zip_path or find_7zip()
+        if not seven_zip:
+            QMessageBox.warning(self, "Нужен 7-Zip", "Для чтения сжатого архива установи 7-Zip и перезапусти GitArchive.")
+            return
+
+        temporary_root = Path(tempfile.mkdtemp(prefix=".gitarchive-history-", dir=str(archive.parent)))
+        worker = GitCommand([
+            str(self.core), "materialize",
+            "--archive", str(archive),
+            "--destination", str(temporary_root),
+            "--storage-format", storage_format,
+            "--seven-zip", seven_zip,
+        ], timeout=3600)
+        self.history_workers.append(worker)
+        worker.signals.completed.connect(
+            lambda code, stdout, stderr, w=worker, root=temporary_root, name=repo.get("name", "repository"):
+                self.history_materialized(w, root, name, code, stdout, stderr)
+        )
+        self.thread_pool.start(worker)
+        self.log(f"Распаковка {repository_label(repo)} во временную папку для просмотра коммитов.")
+
+    def history_materialized(
+        self,
+        worker: GitCommand,
+        temporary_root: Path,
+        repo_name: str,
+        code: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        if worker in self.history_workers:
+            self.history_workers.remove(worker)
+        mirror = temporary_root / "mirror.git"
+        if code != 0 or not (mirror / "HEAD").is_file() or not (mirror / "objects").is_dir():
+            shutil.rmtree(temporary_root, ignore_errors=True)
+            QMessageBox.warning(
+                self, "Не удалось открыть историю",
+                stderr or stdout or "Не удалось безопасно распаковать архив для просмотра."
             )
             return
+        self.show_commit_history(mirror, repo_name)
+        shutil.rmtree(temporary_root, ignore_errors=True)
+
+    def show_commit_history(self, archive: Path, repo_name: str) -> None:
         dialog = CommitHistoryDialog(
-            archive, repo.get("name", "repository"), self.thread_pool, self
+            archive, repo_name, self.thread_pool, self
         )
         dialog.setStyleSheet(self.styleSheet())
         dialog.exec()
@@ -864,11 +993,21 @@ class GitArchiveWindow(QMainWindow):
         if not repo:
             return
         archive = Path(repo["local_path"])
-        if not archive.joinpath("HEAD").is_file() or not archive.joinpath("objects").is_dir():
+        storage_format = repository_storage_format(repo)
+        if storage_format == "folder":
+            archive_ready = (archive / "HEAD").is_file() and (archive / "objects").is_dir()
+        else:
+            archive_ready = archive.is_file()
+        if not archive_ready:
             QMessageBox.information(self, "Архив не найден", "Сначала дождись первой успешной синхронизации репозитория.")
             return
         if not self.core.is_file():
             QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat, чтобы собрать движок.")
+            return
+
+        seven_zip = self.seven_zip_path or find_7zip()
+        if storage_format != "folder" and not seven_zip:
+            QMessageBox.warning(self, "Нужен 7-Zip", "Для восстановления ZIP/7z установи 7-Zip и перезапусти GitArchive.")
             return
 
         parent = QFileDialog.getExistingDirectory(
@@ -895,10 +1034,14 @@ class GitArchiveWindow(QMainWindow):
         self.restore_process = process
         self.restore_destination = destination
         self.log(f"Восстановление {repository_label(repo)} → {destination}")
-        process.start(
-            str(self.core),
-            ["restore", "--archive", str(archive), "--destination", str(destination)],
-        )
+        arguments = [
+            "restore", "--archive", str(archive),
+            "--destination", str(destination),
+            "--storage-format", storage_format,
+        ]
+        if storage_format != "folder" and seven_zip:
+            arguments.extend(["--seven-zip", seven_zip])
+        process.start(str(self.core), arguments)
 
     def read_restore_output(self, process: QProcess) -> None:
         output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -947,13 +1090,15 @@ class GitArchiveWindow(QMainWindow):
             return
         path = Path(repo["local_path"])
         if not path.exists():
-            QMessageBox.information(self, "Архива пока нет", "Папка появится после первой успешной синхронизации.")
-        elif sys.platform == "win32":
-            os.startfile(str(path))
+            QMessageBox.information(self, "Архива пока нет", "Файл или папка появится после первой успешной синхронизации.")
+            return
+        target = path.parent if path.is_file() else path
+        if sys.platform == "win32":
+            os.startfile(str(target))
         else:
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def sync_one(self, repo_id: str) -> None:
         if repo_id in self.processes or repo_id in self.queue:
@@ -977,6 +1122,14 @@ class GitArchiveWindow(QMainWindow):
             return
         maximum = max(1, int(self.config.get("max_parallel", 3)))
         while self.queue and len(self.processes) < maximum:
+            active_compressed = any(
+                (active_repo := self.find_repo(active_id)) is not None
+                and repository_storage_format(active_repo) != "folder"
+                for active_id in self.processes
+            )
+            if active_compressed:
+                break
+
             if self.total_size() >= int(self.config.get("max_storage_gb", 100)) * GIB:
                 for repo_id in self.queue:
                     repo = self.find_repo(repo_id)
@@ -985,10 +1138,27 @@ class GitArchiveWindow(QMainWindow):
                 self.queue.clear()
                 self.log("Достигнут лимит хранилища. Новые синхронизации приостановлены; архивы сохранены.")
                 break
+
             repo_id = self.queue.pop(0)
             repo = self.find_repo(repo_id)
             if not repo:
                 continue
+
+            storage_format = repository_storage_format(repo)
+            if storage_format != "folder" and self.processes:
+                # Compression repacks the whole repository; run it alone to avoid
+                # competing with other Git tasks for CPU, RAM and disk bandwidth.
+                self.queue.insert(0, repo_id)
+                break
+
+            seven_zip = self.seven_zip_path or find_7zip()
+            if storage_format != "folder" and not seven_zip:
+                repo["status"] = "Ошибка — нужен 7-Zip"
+                repo["last_error"] = "Для ZIP/7z требуется установленный 7-Zip CLI."
+                save_config(self.config)
+                self.log(f"Пропуск {repository_label(repo)}: 7-Zip не найден.")
+                continue
+
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             proxy = proxy_url(self.config)
@@ -1010,7 +1180,16 @@ class GitArchiveWindow(QMainWindow):
             repo["last_error"] = ""
             save_config(self.config)
             self.log(f"Начата синхронизация {repository_label(repo)}")
-            process.start(str(self.core), ["sync", "--url", repo["url"], "--destination", repo["local_path"]])
+            arguments = [
+                "sync",
+                "--url", repo["url"],
+                "--destination", repo["local_path"],
+                "--storage-format", storage_format,
+                "--compression-level", str(repo.get("compression_level") or "medium"),
+            ]
+            if storage_format != "folder" and seven_zip:
+                arguments.extend(["--seven-zip", seven_zip])
+            process.start(str(self.core), arguments)
         self.refresh()
 
     def read_output(self, process: QProcess) -> None:
@@ -1097,7 +1276,7 @@ class GitArchiveWindow(QMainWindow):
         repos = self.config["repositories"]
         size = self.total_size()
         self.stats["repos"].setText(str(len(repos)))
-        self.stats["mirrors"].setText(str(sum(bool(r.get("local_path")) and Path(r["local_path"]).is_dir() for r in repos)))
+        self.stats["mirrors"].setText(str(sum(bool(r.get("local_path")) and Path(r["local_path"]).exists() for r in repos)))
         self.stats["size"].setText(human_size(size))
         self.stats["running"].setText(str(len(self.processes)))
         for table in (self.dashboard_table, self.repo_table):
@@ -1156,6 +1335,26 @@ class GitArchiveWindow(QMainWindow):
         if path:
             self.storage_edit.setText(path)
 
+    def update_storage_format_controls(self, *_args) -> None:
+        storage_format = self.storage_format.currentData()
+        compressed = storage_format in {"zip", "7z"}
+        self.compression_level.setEnabled(compressed and bool(self.seven_zip_path))
+        if not self.seven_zip_path:
+            note = "ZIP и 7z требуют установленный 7-Zip с консольным файлом 7z.exe. После установки перезапусти GitArchive."
+        elif not compressed:
+            note = "Папка .git — рекомендуемый вариант: Git обновляет её на месте без повторной распаковки и сжатия."
+        elif storage_format == "zip":
+            note = (
+                "ZIP совместим почти со всеми архиваторами. При каждом обновлении зеркало временно распаковывается "
+                "и собирается заново. GitArchive использует один поток 7-Zip."
+            )
+        else:
+            note = (
+                "7z обычно сжимает лучше ZIP, но обновление медленнее. Используется один поток и ограниченный "
+                "словарь до 64 МБ, чтобы ограничить расход памяти."
+            )
+        self.compression_note.setText(note)
+
     def save_settings(self) -> None:
         storage = self.storage_edit.text().strip()
         if not storage:
@@ -1166,11 +1365,21 @@ class GitArchiveWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(self, "Ошибка папки", str(error))
             return
+
+        new_storage_format = str(self.storage_format.currentData() or "folder")
+        compression_level = str(self.compression_level.currentData() or "medium")
+        self.seven_zip_path = find_7zip()
+        if new_storage_format in {"zip", "7z"} and not self.seven_zip_path:
+            QMessageBox.warning(self, "Нужен 7-Zip", "Для ZIP/7z установи 7-Zip и перезапусти GitArchive.")
+            return
+
         self.config.update({
             "storage_path": str(Path(storage).expanduser()),
             "max_storage_gb": self.limit.value(),
             "sync_interval_minutes": self.interval.value(),
             "max_parallel": self.parallel.value(),
+            "new_storage_format": new_storage_format,
+            "compression_level": compression_level,
             "theme": self.theme.currentData(),
             "start_with_windows": self.start_with_windows.isChecked(),
             "close_to_tray": self.close_to_tray.isChecked(),
