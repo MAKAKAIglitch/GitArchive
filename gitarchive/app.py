@@ -1817,8 +1817,46 @@ class GitArchiveWindow(QMainWindow):
         self.start_queued()
         self.refresh()
 
+    @staticmethod
+    def _normalize_proxy_scheme(value: str) -> str:
+        value = value.strip()
+        if value.lower().startswith("socks5://"):
+            return "socks5h://" + value[9:]
+        if value.lower().startswith("socks4://"):
+            return "socks4a://" + value[9:]
+        return value
+
+    def _default_https_proxy(self) -> str | None:
+        """Resolve the generic proxy Git/cURL uses for HTTPS destinations."""
+        if self.config.get("proxy_enabled"):
+            return proxy_url(self.config)
+
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get", "http.proxy"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+                check=False,
+            )
+            configured = result.stdout.strip() if result.returncode == 0 else ""
+            if configured:
+                return self._normalize_proxy_scheme(configured)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            value = os.environ.get(key, "").strip()
+            if value:
+                return self._normalize_proxy_scheme(value)
+        return None
+
     def _configured_https_proxy(self, remote_url: str) -> str | None:
-        """Resolve the same upstream proxy Git would use for this HTTPS remote."""
+        """Resolve any URL-specific Git proxy, falling back to the generic proxy."""
         if self.config.get("proxy_enabled"):
             return proxy_url(self.config)
 
@@ -1836,19 +1874,10 @@ class GitArchiveWindow(QMainWindow):
             )
             configured = result.stdout.strip() if result.returncode == 0 else ""
             if configured:
-                return configured
+                return self._normalize_proxy_scheme(configured)
         except (OSError, subprocess.TimeoutExpired):
             pass
-
-        for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
-            value = os.environ.get(key, "").strip()
-            if value:
-                if value.lower().startswith("socks5://"):
-                    value = "socks5h://" + value[9:]
-                elif value.lower().startswith("socks4://"):
-                    value = "socks4a://" + value[9:]
-                return value
-        return None
+        return self._default_https_proxy()
 
     def prepare_download_proxy(self, remote_url: str) -> str | None:
         """Return the local aggregate limiter URL for HTTPS remotes only."""
@@ -1861,11 +1890,12 @@ class GitArchiveWindow(QMainWindow):
                 return None
             port = parsed.port or 443
             no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+            default_upstream = self._default_https_proxy()
             if self.download_proxy is None:
                 self.download_proxy = ThrottledHttpProxy(limit_mbps * 1_000_000, no_proxy)
             else:
                 self.download_proxy.set_limit(limit_mbps * 1_000_000)
-                self.download_proxy.set_upstream_proxy(None, no_proxy)
+            self.download_proxy.set_upstream_proxy(default_upstream, no_proxy)
             upstream = self._configured_https_proxy(remote_url)
             self.download_proxy.set_route(parsed.hostname, port, upstream)
             return self.download_proxy.start()
