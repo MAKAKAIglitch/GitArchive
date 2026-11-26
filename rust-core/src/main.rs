@@ -189,6 +189,22 @@ async fn check_git() -> Result<()> {
     Ok(())
 }
 
+fn valid_git_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.starts_with('-')
+        && host.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '-' | ':' | '[' | ']')
+        })
+}
+
+fn valid_ssh_user(user: &str) -> bool {
+    !user.is_empty()
+        && user.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+}
+
 fn validate_git_url(url: &str) -> Result<()> {
     if url.is_empty()
         || url.chars().any(|character| character.is_whitespace() || character.is_control())
@@ -204,7 +220,7 @@ fn validate_git_url(url: &str) -> Result<()> {
         let Some((host, path)) = rest.split_once('/') else {
             bail!("HTTPS Git URL must include a server and repository path.");
         };
-        if host.is_empty() || host.contains('@') || path.is_empty() {
+        if !valid_git_host(host) || path.is_empty() {
             bail!("Invalid HTTPS Git clone URL.");
         }
         return Ok(());
@@ -214,11 +230,12 @@ fn validate_git_url(url: &str) -> Result<()> {
         let Some((authority, path)) = rest.split_once('/') else {
             bail!("SSH Git URL must include a server and repository path.");
         };
-        let host = authority.rsplit('@').next().unwrap_or_default();
-        if host.is_empty()
-            || authority.matches('@').count() > 1
-            || path.is_empty()
-        {
+        let host = match authority.rsplit_once('@') {
+            Some((user, host)) if valid_ssh_user(user) && authority.matches('@').count() == 1 => host,
+            Some(_) => bail!("Invalid SSH user information in Git URL."),
+            None => authority,
+        };
+        if !valid_git_host(host) || path.is_empty() {
             bail!("Invalid SSH Git clone URL.");
         }
         return Ok(());
@@ -227,7 +244,7 @@ fn validate_git_url(url: &str) -> Result<()> {
     // Standard scp-like SSH form: git@host:group/project.git.
     if let Some((identity, path)) = url.split_once(':') {
         if let Some((user, host)) = identity.rsplit_once('@') {
-            if !user.is_empty() && !host.is_empty() && !path.is_empty() && !host.contains('/') {
+            if valid_ssh_user(user) && valid_git_host(host) && !path.is_empty() {
                 return Ok(());
             }
         }
@@ -338,7 +355,9 @@ mod tests {
         assert!(validate_git_url("file:///C:/repo").is_err());
         assert!(validate_git_url("ext::command").is_err());
         assert!(validate_git_url("https://git.example.net/team/project.git?token=secret").is_err());
-        assert!(validate_git_url("https://git.example.net/team/project.git\\n").is_err());
+        assert!(validate_git_url("https://git.example.net/team/project.git\n").is_err());
+        assert!(validate_git_url("ssh://user:password@git.example.net/team/project.git").is_err());
+        assert!(validate_git_url("ssh://-oProxyCommand=bad@git.example.net/team/project.git").is_err());
     }
 
     #[tokio::test]
