@@ -3,6 +3,7 @@ import unittest
 from gitarchive.priority import (
     CPU_PRIORITY_CLASSES,
     MEMORY_PRIORITY_VALUES,
+    PROCESS_MEMORY_PRIORITY_CLASS,
     memory_priority_value,
     normalize_cpu_priority,
     normalize_memory_priority,
@@ -15,6 +16,9 @@ class BackgroundPriorityTests(unittest.TestCase):
         self.assertEqual(CPU_PRIORITY_CLASSES["idle"], 0x00000040)
         self.assertEqual(CPU_PRIORITY_CLASSES["below_normal"], 0x00004000)
         self.assertEqual(CPU_PRIORITY_CLASSES["normal"], 0x00000020)
+
+    def test_memory_priority_information_class_uses_windows_enum_value_zero(self):
+        self.assertEqual(PROCESS_MEMORY_PRIORITY_CLASS, 0)
 
     def test_memory_priority_levels_match_windows_values(self):
         self.assertEqual(MEMORY_PRIORITY_VALUES["very_low"], 1)
