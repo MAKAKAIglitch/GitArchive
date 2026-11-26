@@ -146,7 +146,10 @@ class GitCommand(QRunnable):
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            self.signals.completed.emit(result.returncode, result.stdout, result.stderr)
+            stdout = result.stdout
+            if len(stdout) > 1_500_000:
+                stdout = stdout[:1_500_000] + "\n\n[GitArchive] Вывод обрезан после 1,5 МБ. Полный коммит остаётся в локальном архиве."
+            self.signals.completed.emit(result.returncode, stdout, result.stderr)
         except (OSError, subprocess.TimeoutExpired) as error:
             self.signals.completed.emit(-1, "", str(error))
 
@@ -249,7 +252,8 @@ class CommitHistoryDialog(QDialog):
         self.details.setPlainText("Загрузка сведений о коммите…")
         self.run_git([
             "git", "--git-dir", str(self.archive),
-            "show", "--no-ext-diff", "--stat", "--summary", "--format=fuller", self.selected_sha,
+            "show", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+            "--stat", "--patch", "--summary", "--format=fuller", self.selected_sha,
         ], self.commit_loaded)
 
     def commit_loaded(self, code: int, stdout: str, stderr: str) -> None:
