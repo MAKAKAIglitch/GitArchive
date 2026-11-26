@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
+from .repository import folder_size, human_size, parse_github_url
+
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
@@ -62,66 +62,6 @@ def save_config(config: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
-
-
-def parse_github_url(value: str) -> tuple[str, str, str]:
-    value = value.strip()
-    if value.startswith("git@github.com:"):
-        parts = value.split(":", 1)[1].strip("/").split("/")
-        url_type = "ssh"
-    else:
-        parsed = urlsplit(value if "://" in value else "https://" + value)
-        if parsed.hostname not in {"github.com", "www.github.com"}:
-            raise ValueError("Нужна ссылка именно на github.com.")
-        parts = parsed.path.strip("/").split("/")
-        url_type = "https"
-    if len(parts) < 2:
-        raise ValueError("Формат ссылки: https://github.com/owner/repository")
-    owner, name = (re.sub(r"\.git$", "", part) for part in parts[:2])
-    if owner in {".", ".."} or name in {".", ".."} or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part or "") for part in (owner, name)):
-        raise ValueError("Не удалось распознать owner/repository.")
-    url = f"git@github.com:{owner}/{name}.git" if url_type == "ssh" else f"https://github.com/{owner}/{name}.git"
-    return url, owner, name
-
-
-def folder_size(path: Path) -> int:
-    if str(path) in {"", "."} or not path.is_dir():
-        return 0
-    total = 0
-    for root, _, files in os.walk(path):
-        for filename in files:
-            try:
-                total += (Path(root) / filename).stat().st_size
-            except OSError:
-                pass
-    return total
-
-
-def human_size(size: int) -> str:
-    value = float(max(size, 0))
-    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if value < 1024 or unit == "ТБ":
-            return f"{int(value)} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} ТБ"
-
-
-class SizeSignals(QObject):
-    completed = Signal(dict)
-
-
-class SizeScan(QRunnable):
-    def __init__(self, repositories: list[tuple[str, str]]) -> None:
-        super().__init__()
-        self.repositories = repositories
-        self.signals = SizeSignals()
-
-    def run(self) -> None:
-        result = {
-            repo_id: folder_size(Path(path))
-            for repo_id, path in self.repositories
-        }
-        self.signals.completed.emit(result)
 
 
 def windows_dark_theme() -> bool:
