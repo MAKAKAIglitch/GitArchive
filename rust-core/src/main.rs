@@ -63,7 +63,12 @@ async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
             .arg(destination)
             // --mirror sets remote.origin.mirror=true; that mode can prune deleted refs.
             // Override it and provide an explicit refspec so old local refs remain archived.
-            .args(["-c", "remote.origin.mirror=false", "fetch", "--force", "origin", "+refs/*:refs/*"])
+            .args([
+                "-c", "remote.origin.mirror=false",
+                "-c", "fetch.prune=false",
+                "-c", "remote.origin.prune=false",
+                "fetch", "--force", "origin", "+refs/*:refs/*",
+            ])
             .output()
             .await
             .context("Could not start Git fetch")?;
