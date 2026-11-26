@@ -1185,7 +1185,7 @@ class GitArchiveWindow(QMainWindow):
                 "--url", repo["url"],
                 "--destination", repo["local_path"],
                 "--storage-format", storage_format,
-                "--compression-level", str(repo.get("compression_level") or "medium"),
+                "--compression-level", str(self.config.get("compression_level") or "medium"),
             ]
             if storage_format != "folder" and seven_zip:
                 arguments.extend(["--seven-zip", seven_zip])
