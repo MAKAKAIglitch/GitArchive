@@ -10,6 +10,7 @@
 - Create bare Git mirrors containing branches, tags, and Git objects.
 - Refresh repositories every **10 minutes** by default; the interval is configurable.
 - Preserve old ref tips before each fetch under `refs/gitarchive/snapshots/`, retaining history after force-pushes.
+- Restore a normal working copy from a local mirror, including archived historical refs.
 - Never prune remote refs or delete a local mirror when its source becomes unavailable.
 - Run several repository syncs concurrently (three by default).
 - Show local archive sizes and apply a global **soft** storage limit.
@@ -72,7 +73,7 @@ Run the Rust integration tests (requires the stable Rust toolchain):
 cargo test --manifest-path rust-core/Cargo.toml
 ```
 
-The Rust test creates temporary local Git repositories and verifies force-push retention, deleted-branch retention with pruning enabled, and idempotent snapshots.
+The Rust tests create temporary local Git repositories and verify force-push retention, deleted-branch retention with pruning enabled, idempotent snapshots, and safe restoration of working copies with their historical refs.
 
 ## License
 
