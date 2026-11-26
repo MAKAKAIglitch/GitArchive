@@ -1,0 +1,3 @@
+# Build-only dependency for producing the Windows desktop bundle.
+# PyInstaller bundles the Python runtime and PySide6; the Rust engine is built separately.
+pyinstaller==6.22.3
