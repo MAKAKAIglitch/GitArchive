@@ -20,6 +20,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONUTF8: "1"
+      PY_PYTHON: "3.11"
 
     steps:
       - name: Check out source
