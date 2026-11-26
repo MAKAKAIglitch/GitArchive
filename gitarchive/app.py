@@ -958,7 +958,7 @@ class GitArchiveWindow(QMainWindow):
         self.download_proxy: ThrottledHttpProxy | None = None
         self._default_https_proxy_loaded = False
         self._default_https_proxy_cache: str | None = None
-        self._https_proxy_cache: dict[str, str | None] = {}
+        self._https_proxy_cache: dict[tuple[str, str], str | None] = {}
         self._https_proxy_lookup_failed = False
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
@@ -1875,16 +1875,43 @@ class GitArchiveWindow(QMainWindow):
         self._default_https_proxy_loaded = True
         return self._default_https_proxy_cache
 
-    def _configured_https_proxy(self, remote_url: str) -> str | None:
-        """Resolve URL-specific Git proxy settings, falling back to the generic proxy."""
+    def _configured_https_proxy(
+        self, remote_url: str, repository_path: str | None = None
+    ) -> str | None:
+        """Resolve URL-specific proxy settings, including an existing bare mirror's config."""
         if self.config.get("proxy_enabled"):
             return proxy_url(self.config)
-        if remote_url in self._https_proxy_cache:
-            return self._https_proxy_cache[remote_url]
+
+        git_prefix = ["git"]
+        cache_path = ""
+        if repository_path:
+            archive = Path(repository_path).expanduser()
+            if archive.is_dir() and (archive / "config").is_file() and (archive / "objects").is_dir():
+                git_prefix.extend(["--git-dir", str(archive)])
+                cache_path = str(archive.resolve())
+        cache_key = (cache_path, remote_url)
+        if cache_key in self._https_proxy_cache:
+            return self._https_proxy_cache[cache_key]
 
         try:
+            auth_probe = subprocess.run(
+                git_prefix + ["config", "--get-urlmatch", "http.proxyAuthMethod", remote_url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1.5,
+                check=False,
+            )
+            if auth_probe.returncode == 0 and auth_probe.stdout.strip():
+                raise ProxyConfigurationError(
+                    "Git proxy authentication methods are not forwarded by the bandwidth limiter"
+                )
+
             result = subprocess.run(
-                ["git", "config", "--get-urlmatch", "http.proxy", remote_url],
+                git_prefix + ["config", "--get-urlmatch", "http.proxy", remote_url],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -1900,6 +1927,8 @@ class GitArchiveWindow(QMainWindow):
                 if configured
                 else self._default_https_proxy()
             )
+        except ProxyConfigurationError:
+            raise
         except subprocess.TimeoutExpired as error:
             self._https_proxy_lookup_failed = True
             raise ProxyConfigurationError(
@@ -1908,10 +1937,12 @@ class GitArchiveWindow(QMainWindow):
         except OSError:
             upstream = self._default_https_proxy()
 
-        self._https_proxy_cache[remote_url] = upstream
+        self._https_proxy_cache[cache_key] = upstream
         return upstream
 
-    def prepare_download_proxy(self, remote_url: str) -> str | None:
+    def prepare_download_proxy(
+        self, remote_url: str, repository_path: str | None = None
+    ) -> str | None:
         """Return the local aggregate limiter URL for HTTPS remotes only."""
         limit_mbps = normalize_download_limit(self.config.get("sync_download_limit_mbps", 3))
         if limit_mbps <= 0 or self._https_proxy_lookup_failed:
@@ -1923,7 +1954,7 @@ class GitArchiveWindow(QMainWindow):
             port = parsed.port or 443
             no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
             default_upstream = self._default_https_proxy()
-            upstream = self._configured_https_proxy(remote_url)
+            upstream = self._configured_https_proxy(remote_url, repository_path)
             if self.download_proxy is None:
                 self.download_proxy = ThrottledHttpProxy(limit_mbps * 1_000_000, no_proxy)
             else:
@@ -2000,7 +2031,9 @@ class GitArchiveWindow(QMainWindow):
 
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-            throttle_url = self.prepare_download_proxy(str(repo.get("url") or ""))
+            throttle_url = self.prepare_download_proxy(
+                str(repo.get("url") or ""), str(repo.get("local_path") or "")
+            )
             process.setProcessEnvironment(background_process_environment(self.config, throttle_url))
             process.readyReadStandardOutput.connect(lambda p=process: self.read_output(p))
             process.started.connect(lambda p=process: self.sync_process_started(p))
