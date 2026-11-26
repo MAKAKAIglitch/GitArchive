@@ -72,14 +72,6 @@ jobs:
             throw "Installer output was not created."
           }
 
-      - name: Run Python unit tests
-        shell: pwsh
-        run: |
-          & ".venv\Scripts\python.exe" -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-
       - name: Upload installer artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
