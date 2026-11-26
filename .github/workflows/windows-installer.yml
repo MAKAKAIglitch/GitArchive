@@ -1,0 +1,89 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitarchive-windows-installer
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: stable
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+          $candidates = @(
+            "$programFilesX86\Inno Setup 7\ISCC.exe",
+            "$programFilesX86\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $compiler -and -not ($candidates | Where-Object { Test-Path $_ })) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) {
+              throw "Chocolatey could not install Inno Setup."
+            }
+          }
+          $compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $compiler -and -not ($candidates | Where-Object { Test-Path $_ })) {
+            throw "Inno Setup compiler (ISCC.exe) was not found."
+          }
+
+      - name: Build portable app and installer
+        shell: pwsh
+        run: |
+          cmd.exe /d /s /c "build_windows.bat"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          if (-not (Test-Path "dist-installer\GitArchive-Setup.exe")) {
+            throw "Installer output was not created."
+          }
+
+      - name: Run Python unit tests
+        shell: pwsh
+        run: |
+          & ".venv\Scripts\python.exe" -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: GitArchive-Windows-Installer
+          path: dist-installer/GitArchive-Setup.exe
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
