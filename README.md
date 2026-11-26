@@ -22,7 +22,7 @@
 2. Clone this repository.
 3. Double-click `start.bat`.
 
-The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engine in release mode, and starts the app. It does not install system-wide packages or change Windows settings.
+The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engine in release mode, and starts the app. It does not install system-wide packages or change Windows settings. The standard Rust MSVC toolchain may also require **Visual Studio Build Tools** with the C++ build tools workload; install it if Cargo reports that `link.exe` or the MSVC linker is missing.
 
 - Python: https://www.python.org/downloads/windows/
 - Rust: https://rustup.rs/
