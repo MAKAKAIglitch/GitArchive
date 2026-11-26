@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 import uuid
 from datetime import datetime
@@ -12,10 +14,11 @@ from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
 from .repository import archive_path, folder_size, human_size, parse_git_url
 
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QSpinBox, QStackedWidget, QStyle,
-    QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox,
+    QStackedWidget, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 APP_NAME = "GitArchive"
@@ -69,6 +72,167 @@ def save_config(config: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+class GitCommandSignals(QObject):
+    completed = Signal(int, str, str)
+
+
+class GitCommand(QRunnable):
+    """Run local Git inspection/export commands without blocking the UI thread."""
+
+    def __init__(self, args: list[str], timeout: int = 120) -> None:
+        super().__init__()
+        self.args = args
+        self.timeout = timeout
+        self.signals = GitCommandSignals()
+
+    def run(self) -> None:
+        try:
+            result = subprocess.run(
+                self.args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.signals.completed.emit(result.returncode, result.stdout, result.stderr)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.signals.completed.emit(-1, "", str(error))
+
+
+class CommitHistoryDialog(QDialog):
+    def __init__(self, archive: Path, repo_name: str, pool: QThreadPool, parent=None) -> None:
+        super().__init__(parent)
+        self.archive = archive
+        self.repo_name = repo_name
+        self.pool = pool
+        self.workers: list[GitCommand] = []
+        self.commits: dict[str, dict[str, str]] = {}
+        self.selected_sha: str | None = None
+        self.setWindowTitle(f"История коммитов — {repo_name}")
+        self.resize(1050, 680)
+        self.setMinimumSize(760, 480)
+
+        layout = QVBoxLayout(self)
+        header = QLabel(f"История локального архива · {repo_name}")
+        header.setObjectName("Section")
+        layout.addWidget(header)
+        body = QHBoxLayout()
+        self.commit_list = QListWidget()
+        self.commit_list.setMinimumWidth(330)
+        self.commit_list.currentItemChanged.connect(self.show_commit)
+        self.details = QTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setPlaceholderText("Выбери коммит, чтобы посмотреть его описание и изменённые файлы.")
+        body.addWidget(self.commit_list, 1)
+        body.addWidget(self.details, 2)
+        layout.addLayout(body, 1)
+        actions = QHBoxLayout()
+        self.download = QPushButton("Скачать выбранный коммит (.zip)")
+        self.download.setObjectName("Accent")
+        self.download.setEnabled(False)
+        self.download.clicked.connect(self.export_commit)
+        close = QPushButton("Закрыть")
+        close.setObjectName("Secondary")
+        close.clicked.connect(self.accept)
+        actions.addWidget(self.download)
+        actions.addStretch(1)
+        actions.addWidget(close)
+        layout.addLayout(actions)
+        self.load_history()
+
+    def run_git(self, args: list[str], callback, timeout: int = 120) -> None:
+        worker = GitCommand(args, timeout)
+        self.workers.append(worker)
+        worker.signals.completed.connect(
+            lambda code, stdout, stderr, w=worker: self._worker_done(w, callback, code, stdout, stderr)
+        )
+        self.pool.start(worker)
+
+    def _worker_done(self, worker, callback, code: int, stdout: str, stderr: str) -> None:
+        if worker in self.workers:
+            self.workers.remove(worker)
+        callback(code, stdout, stderr)
+
+    def load_history(self) -> None:
+        self.commit_list.clear()
+        self.commit_list.addItem("Загрузка истории…")
+        self.run_git([
+            "git", "--git-dir", str(self.archive),
+            "log", "-n", "250", "--date=iso-strict",
+            "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
+            "--all", "--decorate=short",
+        ], self.history_loaded)
+
+    def history_loaded(self, code: int, stdout: str, stderr: str) -> None:
+        self.commit_list.clear()
+        if code != 0:
+            self.details.setPlainText(stderr or "Не удалось прочитать историю Git.")
+            return
+        for line in stdout.splitlines():
+            parts = line.split("\x1f", 4)
+            if len(parts) != 5:
+                continue
+            sha, short_sha, author, date, subject = parts
+            if not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha):
+                continue
+            self.commits[sha] = {
+                "short": short_sha, "author": author, "date": date, "subject": subject
+            }
+            item = QListWidgetItem(f"{subject}\n{short_sha} · {author} · {date}")
+            item.setData(Qt.ItemDataRole.UserRole, sha)
+            self.commit_list.addItem(item)
+        if not self.commits:
+            self.details.setPlainText("В архиве пока нет коммитов.")
+        elif self.commit_list.count():
+            self.commit_list.setCurrentRow(0)
+
+    def show_commit(self, current, _previous=None) -> None:
+        if current is None:
+            return
+        sha = current.data(Qt.ItemDataRole.UserRole)
+        if not sha:
+            return
+        self.selected_sha = str(sha)
+        self.download.setEnabled(True)
+        self.details.setPlainText("Загрузка сведений о коммите…")
+        self.run_git([
+            "git", "--git-dir", str(self.archive),
+            "show", "--no-ext-diff", "--stat", "--summary", "--format=fuller", self.selected_sha,
+        ], self.commit_loaded)
+
+    def commit_loaded(self, code: int, stdout: str, stderr: str) -> None:
+        self.details.setPlainText(stdout if code == 0 else (stderr or "Не удалось прочитать коммит."))
+
+    def export_commit(self) -> None:
+        sha = self.selected_sha
+        if not sha or not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha):
+            return
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "Скачать коммит", f"{self.repo_name}-{sha[:12]}.zip", "ZIP-архив (*.zip)"
+        )
+        if not destination:
+            return
+        if not destination.lower().endswith(".zip"):
+            destination += ".zip"
+        self.download.setEnabled(False)
+        self.details.append("\n\nСоздание ZIP-архива…")
+        self.run_git([
+            "git", "--git-dir", str(self.archive),
+            "archive", "--format=zip", f"--output={destination}", sha,
+        ], lambda code, out, err: self.export_finished(destination, code, out, err), timeout=3600)
+
+    def export_finished(self, destination: str, code: int, stdout: str, stderr: str) -> None:
+        self.download.setEnabled(bool(self.selected_sha))
+        if code == 0 and Path(destination).is_file():
+            self.details.append(f"\nГотово: {destination}")
+            QMessageBox.information(self, "Коммит сохранён", f"Архив коммита создан:\n{destination}")
+        else:
+            self.details.append(f"\nОшибка экспорта: {stderr or stdout}")
 
 
 class SizeSignals(QObject):
@@ -369,7 +533,11 @@ class GitArchiveWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in (1, 2, 3):
             table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        table.cellDoubleClicked.connect(lambda *_args, t=table: self.open_selected_folder(t))
+        table.cellDoubleClicked.connect(lambda *_args, t=table: self.open_commit_history(t))
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda position, t=table: self.repository_context_menu(t, position)
+        )
         return table
 
     def _build_tray(self) -> None:
@@ -483,6 +651,76 @@ class GitArchiveWindow(QMainWindow):
         self.refresh()
         self.scan_sizes()
         self.sync_one(repo["id"])
+
+    def repository_context_menu(self, table: QTableWidget, position) -> None:
+        index = table.indexAt(position)
+        if not index.isValid():
+            return
+        table.selectRow(index.row())
+        repo = self.selected_repo(table)
+        if not repo:
+            return
+        menu = QMenu(self)
+        open_history = menu.addAction("Открыть историю коммитов")
+        sync = menu.addAction("Обновить")
+        open_folder = menu.addAction("Открыть папку архива")
+        restore = menu.addAction("Восстановить рабочую копию")
+        menu.addSeparator()
+        remove = menu.addAction("Удалить из списка")
+        chosen = menu.exec(table.viewport().mapToGlobal(position))
+        if chosen == open_history:
+            self.open_commit_history(table)
+        elif chosen == sync:
+            self.sync_one(repo["id"])
+        elif chosen == open_folder:
+            self.open_selected_folder(table)
+        elif chosen == restore:
+            self.restore_selected()
+        elif chosen == remove:
+            self.remove_repository(repo)
+
+    def open_commit_history(self, table: QTableWidget) -> None:
+        repo = self.selected_repo(table)
+        if not repo:
+            return
+        archive = Path(repo["local_path"])
+        if not (archive / "HEAD").is_file() or not (archive / "objects").is_dir():
+            QMessageBox.information(
+                self, "Архив ещё не готов",
+                "Сначала дождись первой успешной синхронизации этого репозитория."
+            )
+            return
+        dialog = CommitHistoryDialog(
+            archive, repo.get("name", "repository"), self.thread_pool, self
+        )
+        dialog.setStyleSheet(self.styleSheet())
+        dialog.exec()
+
+    def remove_repository(self, repo: dict) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Убрать репозиторий из списка?",
+            f"{repository_label(repo)} будет удалён из списка GitArchive.\n"
+            "Локальный архив на диске останется нетронутым.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if repo.get("id") in self.processes:
+            QMessageBox.warning(
+                self, "Синхронизация выполняется",
+                "Дождись завершения синхронизации перед удалением записи."
+            )
+            return
+        self.config["repositories"] = [
+            item for item in self.config["repositories"] if item.get("id") != repo.get("id")
+        ]
+        self.queue = [repo_id for repo_id in self.queue if repo_id != repo.get("id")]
+        save_config(self.config)
+        self.log(f"Убран из списка (архив сохранён): {repository_label(repo)}")
+        self.refresh()
+        self.scan_sizes()
 
     def selected_repo(self, table: QTableWidget) -> dict | None:
         row = table.currentRow()
