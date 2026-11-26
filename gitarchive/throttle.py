@@ -217,9 +217,9 @@ class ThrottledHttpProxy:
     def _open_tunnel(self, host: str, port: int) -> socket.socket:
         upstream_proxy, no_proxy = self._settings(host, port)
         if self._matches_no_proxy(host, port, no_proxy) or not upstream_proxy:
-            return socket.create_connection((host, port), timeout=20)
+            return socket.create_connection((host, port), timeout=60)
         scheme, proxy_host, proxy_port = self._parse_proxy(upstream_proxy)
-        connection = socket.create_connection((proxy_host, proxy_port), timeout=20)
+        connection = socket.create_connection((proxy_host, proxy_port), timeout=60)
         try:
             if scheme == "https":
                 context = ssl.create_default_context()
@@ -247,7 +247,7 @@ class ThrottledHttpProxy:
             raise ProxyConfigurationError("Upstream proxy needs a host and cannot contain credentials")
         if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
             raise ProxyConfigurationError("Upstream proxy URL cannot contain a path, query, or fragment")
-        default_port = 443 if scheme == "https" else 1080 if scheme.startswith("socks") else 8080
+        default_port = 443 if scheme == "https" else 1080 if scheme.startswith("socks") else 80
         try:
             port = parsed.port or default_port
         except ValueError as error:
