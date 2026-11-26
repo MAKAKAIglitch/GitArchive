@@ -53,7 +53,12 @@ if errorlevel 1 goto :failed
 
 echo [BUILD] Building the Rust archive engine...
 cargo build --release --manifest-path rust-core\Cargo.toml
-if errorlevel 1 goto :failed
+if errorlevel 1 (
+    echo [TIP] If Cargo reports that link.exe or the MSVC linker is missing,
+    echo install Visual Studio Build Tools with the C++ build tools workload.
+    echo https://visualstudio.microsoft.com/visual-cpp-build-tools/
+    goto :failed
+)
 
 echo [RUN] Starting GitArchive...
 ".venv\Scripts\python.exe" -m gitarchive
