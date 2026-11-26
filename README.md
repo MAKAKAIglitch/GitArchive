@@ -30,7 +30,7 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 
 ## Data locations
 
-Settings are stored in the current user's local application data directory (`GitArchive/config.json`). New mirrors are stored under the folder configured in Settings; the default is `~/GitArchive/`.
+Settings are stored in the current user's local application data directory (`GitArchive/config.json`). The local activity log is stored in `GitArchive/logs/gitarchive.log` with one rotated backup. New mirrors are stored under the folder configured in Settings; the default is `~/GitArchive/`.
 
 A mirror is a standard bare Git repository. You can inspect its refs or restore a normal working copy at any time:
 
@@ -43,7 +43,7 @@ git clone "$HOME\GitArchive\owner\repo.git" ".\repo-restored"
 
 This version archives **Git repository data**: branches, tags, and reachable Git objects. It does not yet download GitHub Releases attachments, the GitHub Wiki, Issues, Pull Requests, Actions artifacts, or Git LFS object payloads. Git LFS pointers remain in Git history until dedicated LFS archiving is added.
 
-The storage limit is intentionally a **soft limit**. Git cannot provide a reliable exact estimate of every object a fetch will add before downloading it. GitArchive checks total archive size before starting queued work and pauses new jobs after the configured limit is reached; an already-running fetch can exceed it by the amount it downloads. Existing archives are never automatically deleted to make room.
+The storage limit is intentionally a **soft limit**. Git cannot provide a reliable exact estimate of every object a fetch will add before downloading it. GitArchive checks total archive size before starting queued work and pauses new jobs after the configured limit is reached; already-running parallel fetches can exceed it by the total amount downloaded before they finish. Existing archives are never automatically deleted to make room.
 
 If a fetch fails (for example, because a repository was deleted, made private, or the network is unavailable), GitArchive reports an error and leaves the last local mirror untouched. A fetch error alone cannot prove that a repository was deleted.
 
@@ -57,6 +57,22 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m gitarchive
 ```
+
+## Tests
+
+Run the Python utility tests from the repository root:
+
+```powershell
+py -3 -m unittest discover -s tests -v
+```
+
+Run the Rust integration tests (requires the stable Rust toolchain):
+
+```powershell
+cargo test --manifest-path rust-core/Cargo.toml
+```
+
+The Rust test creates temporary local Git repositories and verifies force-push retention, deleted-branch retention with pruning enabled, and idempotent snapshots.
 
 ## License
 
