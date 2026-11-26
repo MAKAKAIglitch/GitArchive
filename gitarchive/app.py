@@ -1159,7 +1159,17 @@ class GitArchiveWindow(QMainWindow):
         self.config["repositories"] = [
             item for item in self.config["repositories"] if item.get("id") != repo.get("id")
         ]
-        self.queue = [repo_id for repo_id in self.queue if repo_id != repo.get("id")]
+        repo_id = str(repo.get("id") or "")
+        was_queued = repo_id in self.queue
+        self.queue = [queued_id for queued_id in self.queue if queued_id != repo_id]
+        if was_queued:
+            self.sync_progress.pop(repo_id, None)
+            self.sync_batch_total = max(0, self.sync_batch_total - 1)
+            if not self.queue and not self.processes:
+                self.sync_batch_completed = 0
+                self.sync_batch_errors = 0
+                self.sync_batch_paused = False
+            self.update_sidebar_progress()
         save_config(self.config)
         self.log(f"Убран из списка (архив сохранён): {repository_label(repo)}")
         self.refresh()
