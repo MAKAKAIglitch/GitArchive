@@ -1,0 +1,16 @@
+[package]
+name = "gitarchive-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Local Git mirror archiver for GitArchive"
+
+[[bin]]
+name = "gitarchive-core"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
