@@ -47,7 +47,7 @@ async fn run() -> Result<()> {
 }
 
 async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
-    validate_github_url(url)?;
+    validate_git_url(url)?;
     check_git().await?;
 
     if let Some(parent) = destination.parent() {
@@ -189,13 +189,51 @@ async fn check_git() -> Result<()> {
     Ok(())
 }
 
-fn validate_github_url(url: &str) -> Result<()> {
-    let valid_https = url.starts_with("https://github.com/");
-    let valid_ssh = url.starts_with("git@github.com:");
-    if !valid_https && !valid_ssh {
-        bail!("Only GitHub repository URLs are supported in this version.");
+fn validate_git_url(url: &str) -> Result<()> {
+    if url.is_empty()
+        || url.chars().any(|character| character.is_whitespace() || character.is_control())
+        || url.contains('?')
+        || url.contains('#')
+    {
+        bail!("Invalid Git clone URL: empty URL, whitespace, query strings and fragments are not allowed.");
     }
-    Ok(())
+
+    // Only standard network transports are accepted. In particular, do not
+    // allow Git's ext::, file://, local-path or arbitrary remote-helper forms.
+    if let Some(rest) = url.strip_prefix("https://") {
+        let Some((host, path)) = rest.split_once('/') else {
+            bail!("HTTPS Git URL must include a server and repository path.");
+        };
+        if host.is_empty() || host.contains('@') || path.is_empty() {
+            bail!("Invalid HTTPS Git clone URL.");
+        }
+        return Ok(());
+    }
+
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let Some((authority, path)) = rest.split_once('/') else {
+            bail!("SSH Git URL must include a server and repository path.");
+        };
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        if host.is_empty()
+            || authority.matches('@').count() > 1
+            || path.is_empty()
+        {
+            bail!("Invalid SSH Git clone URL.");
+        }
+        return Ok(());
+    }
+
+    // Standard scp-like SSH form: git@host:group/project.git.
+    if let Some((identity, path)) = url.split_once(':') {
+        if let Some((user, host)) = identity.rsplit_once('@') {
+            if !user.is_empty() && !host.is_empty() && !path.is_empty() && !host.contains('/') {
+                return Ok(());
+            }
+        }
+    }
+
+    bail!("Unsupported Git URL. Use an HTTPS or SSH clone URL.");
 }
 
 async fn snapshot_refs(repository: &Path) -> Result<()> {
@@ -245,7 +283,7 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_existing_mirror, restore_mirror};
+    use super::{fetch_existing_mirror, restore_mirror, validate_git_url};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command as StdCommand;
@@ -283,6 +321,24 @@ mod tests {
         let mut command = vec!["--git-dir".to_owned(), repo.to_string_lossy().into_owned()];
         command.extend(args.iter().map(|value| (*value).to_owned()));
         git(command)
+    }
+
+    #[test]
+    fn accepts_common_and_custom_https_ssh_git_urls() {
+        assert!(validate_git_url("https://github.com/owner/repo.git").is_ok());
+        assert!(validate_git_url("https://gitlab.com/group/subgroup/repo.git").is_ok());
+        assert!(validate_git_url("https://git.example.net/team/project.git").is_ok());
+        assert!(validate_git_url("ssh://git@git.example.net:2222/team/project.git").is_ok());
+        assert!(validate_git_url("git@git.example.net:team/project.git").is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_or_unsupported_git_transports() {
+        assert!(validate_git_url("http://git.example.net/team/project.git").is_err());
+        assert!(validate_git_url("file:///C:/repo").is_err());
+        assert!(validate_git_url("ext::command").is_err());
+        assert!(validate_git_url("https://git.example.net/team/project.git?token=secret").is_err());
+        assert!(validate_git_url("https://git.example.net/team/project.git\\n").is_err());
     }
 
     #[tokio::test]
