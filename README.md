@@ -32,10 +32,11 @@ The launcher creates `.venv`, installs `requirements.txt`, builds the Rust engin
 
 Settings are stored in the current user's local application data directory (`GitArchive/config.json`). New mirrors are stored under the folder configured in Settings; the default is `~/GitArchive/`.
 
-A mirror is a standard bare Git repository. Example:
+A mirror is a standard bare Git repository. You can inspect its refs or restore a normal working copy at any time:
 
 ```powershell
 git --git-dir "$HOME\GitArchive\owner\repo.git" show-ref
+git clone "$HOME\GitArchive\owner\repo.git" ".\repo-restored"
 ```
 
 ## Archive boundaries and storage limit
