@@ -54,6 +54,7 @@ class LocalizationTests(unittest.TestCase):
 
     def test_download_limit_settings_and_proxy_warning_are_translated(self):
         self.assertEqual(tr("Лимит загрузки HTTPS", "en"), "HTTPS download limit")
+        self.assertEqual(tr(" МБ/с", "en"), " MB/s")
         self.assertEqual(tr("Без ограничений", "en"), "Unlimited")
         self.assertEqual(tr("HTTPS download limit", "ru"), "Лимит загрузки HTTPS")
         warning = tr(
