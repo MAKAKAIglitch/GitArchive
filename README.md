@@ -23,6 +23,7 @@
 - Never prune remote refs or delete a local mirror when its source becomes unavailable.
 - Run up to three folder-format syncs concurrently by default; compressed archive updates are serialized to keep CPU and disk load predictable.
 - Show local archive sizes and apply a global **soft** storage limit.
+- Configure low CPU and memory priority for background engine / Git / 7-Zip processes, with a live synchronization progress panel in the sidebar.
 - Keep a persistent local activity log and prevent multiple app instances from writing to the same mirrors.
 - Minimize to the Windows notification area (system tray).
 - Follow Windows light/dark preference and system accent color; request Mica on supported Windows 11 builds.
@@ -82,6 +83,17 @@ The context menu also provides sync, open archive folder, restore working copy, 
 Settings support HTTP, HTTPS, SOCKS4 and SOCKS5 proxies for HTTPS Git remotes. SOCKS4 uses `socks4a://` and SOCKS5 uses `socks5h://` so DNS resolution is delegated to the proxy. The proxy address and port are stored in the local app config; proxy authentication fields are not implemented. Git's `http.proxy` setting does not proxy SSH clone URLs.
 
 The Windows startup option writes a per-user Run entry (no administrator rights). Background startup starts directly in the tray. The close-to-tray option keeps the app running when the window is closed; use **Exit** in the tray menu to stop it.
+
+## Background process resource priority
+
+The **Background CPU priority** and **Background memory priority** settings apply to the Rust archive engine and the Git / 7-Zip processes it launches. Git commands used by the commit-history viewer and compressed-archive history extraction use the same settings. The visible desktop interface stays at the normal priority so it remains responsive.
+
+- CPU: **Idle** (default), **Below normal**, or **Normal**. Idle-priority work runs only when the scheduler has no higher-priority work to run, so a busy PC can make archive synchronization take longer.
+- Memory: **Very low** (default), **Low**, or **Normal**. This is Windows' working-set trimming priority: when Windows reclaims physical pages, low-priority pages are more likely to be removed first. It does **not** impose a RAM usage cap or stop a process from allocating memory.
+
+The selected values are passed to background processes at launch. They do not change the priority of the main GitArchive window.
+
+The sidebar shows the current synchronization batch. Its percentage is a live estimate based on Git / 7-Zip progress phases and equally weighted active repositories; it is not a byte-weighted overall transfer percentage.
 
 ## Build a Windows portable app and installer
 
