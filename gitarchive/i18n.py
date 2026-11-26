@@ -127,6 +127,7 @@ _TRANSLATIONS = {
     "Интервал синхронизации": "Synchronization interval",
     "Параллельные задачи": "Parallel tasks",
     "Лимит загрузки HTTPS": "HTTPS download limit",
+    " МБ/с": " MB/s",
     "Без ограничений": "Unlimited",
     "0 — без ограничений. Общий лимит для всех активных HTTPS-синхронизаций. SSH не ограничивается.": "0 means unlimited. One shared limit applies to all active HTTPS syncs. SSH is not throttled.",
     "Папка .git — без сжатия": "Folder .git — no compression",
