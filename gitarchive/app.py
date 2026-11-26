@@ -751,7 +751,7 @@ class GitArchiveWindow(QMainWindow):
         elif chosen == open_folder:
             self.open_selected_folder(table)
         elif chosen == restore:
-            self.restore_selected()
+            self.restore_selected(repo)
         elif chosen == remove:
             self.remove_repository(repo)
 
@@ -812,12 +812,12 @@ class GitArchiveWindow(QMainWindow):
         if repo:
             self.sync_one(repo["id"])
 
-    def restore_selected(self) -> None:
+    def restore_selected(self, repo_override: dict | None = None) -> None:
         if self.restore_process and self.restore_process.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.information(self, "Восстановление уже идёт", "Дождись завершения текущего восстановления.")
             return
 
-        repo = self.selected_repo(self.repo_table)
+        repo = repo_override or self.selected_repo(self.repo_table)
         if not repo:
             return
         archive = Path(repo["local_path"])
@@ -1182,6 +1182,15 @@ class GitArchiveWindow(QMainWindow):
             QTableWidget {{ background:{card}; border:1px solid {border}; border-radius:10px; padding:5px; selection-background-color:{hover}; }}
             QTableWidget::item {{ padding:10px 8px; border:0; }}
             QHeaderView::section {{ background:{card}; color:{muted}; border:0; border-bottom:1px solid {border}; padding:10px 8px; font-weight:600; }}
+            QMenu {{ background:{card}; border:1px solid {border}; padding:5px; border-radius:8px; }}
+            QMenu::item {{ padding:8px 28px 8px 12px; border-radius:5px; }}
+            QMenu::item:selected {{ background:{hover}; }}
+            QListWidget {{ background:{card}; border:1px solid {border}; border-radius:9px; padding:5px; }}
+            QListWidget::item {{ padding:9px 7px; border-radius:6px; }}
+            QListWidget::item:selected {{ background:{hover}; }}
+            QCheckBox {{ spacing:8px; }}
+            QCheckBox::indicator {{ width:17px; height:17px; }}
+            QPushButton {{ font-family:'Segoe UI Variable','Segoe UI'; }}
             QLineEdit,QSpinBox,QComboBox {{ background:{field}; border:1px solid {border}; border-radius:6px; padding:7px 9px; min-height:20px; }}
             QComboBox QAbstractItemView {{ background:{card}; selection-background-color:{hover}; }}
             QTextEdit {{ background:{card}; border:1px solid {border}; border-radius:10px; padding:12px; font-family:Consolas; }}
