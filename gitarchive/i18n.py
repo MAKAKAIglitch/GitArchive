@@ -126,6 +126,9 @@ _TRANSLATIONS = {
     " мин": " min",
     "Интервал синхронизации": "Synchronization interval",
     "Параллельные задачи": "Parallel tasks",
+    "Лимит загрузки HTTPS": "HTTPS download limit",
+    "Без ограничений": "Unlimited",
+    "0 — без ограничений. Общий лимит для всех активных HTTPS-синхронизаций. SSH не ограничивается.": "0 means unlimited. One shared limit applies to all active HTTPS syncs. SSH is not throttled.",
     "Папка .git — без сжатия": "Folder .git — no compression",
     "Для ZIP и 7z нужен установленный 7-Zip с командной строкой. Перезапусти GitArchive после установки.": "ZIP and 7z require the 7-Zip command-line tool. Restart GitArchive after installing it.",
     "Формат новых архивов": "New archive format",
@@ -338,6 +341,7 @@ _REVERSE_TRANSLATIONS = {translated: original for original, translated in _TRANS
 
 _DYNAMIC = [
     (re.compile(r"^История коммитов — (.+)$"), "Commit history — {}"),
+    (re.compile(r"^Ограничение скорости не удалось включить; синхронизация продолжится без него: (.+)$"), "Could not enable the bandwidth limit; synchronization will continue without it: {}"),
     (re.compile(r"^История локального архива · (.+)$"), "Local archive history · {}"),
     (re.compile(r"^\nГотово: (.+)$"), "\nDone: {}"),
     (re.compile(r"^Архив коммита создан:\n(.+)$"), "Commit archive created:\n{}"),
