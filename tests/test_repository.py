@@ -155,6 +155,27 @@ class GitRemoteUrlTests(unittest.TestCase):
             Path("archives") / "_custom" / "gitlab.com" / "_CON" / "team" / "_PRN.git",
         )
 
+    def test_archive_paths_support_zip_and_7z_for_github(self):
+        root = Path("archives")
+        self.assertEqual(
+            archive_path(root, "github.com", "owner", "repo", "zip"),
+            root / "owner" / "repo.zip",
+        )
+        self.assertEqual(
+            archive_path(root, "github.com", "owner", "repo", "7z"),
+            root / "owner" / "repo.7z",
+        )
+
+    def test_archive_paths_support_compression_for_custom_hosts(self):
+        self.assertEqual(
+            archive_path(Path("archives"), "git.example.net", "team/subteam", "repo", "zip"),
+            Path("archives") / "_custom" / "git.example.net" / "team" / "subteam" / "repo.zip",
+        )
+
+    def test_archive_paths_reject_unknown_formats(self):
+        with self.assertRaises(ValueError):
+            archive_path(Path("archives"), "github.com", "owner", "repo", "rar")
+
     def test_rejects_plain_http(self):
         with self.assertRaises(ValueError):
             parse_git_url("http://git.example.net/group/repo.git")
@@ -212,6 +233,12 @@ class ArchiveSizeTests(unittest.TestCase):
     def test_missing_folder_size_is_zero(self):
         with tempfile.TemporaryDirectory() as temporary:
             self.assertEqual(folder_size(Path(temporary) / "missing"), 0)
+
+    def test_folder_size_counts_compressed_archive_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "repo.zip"
+            archive.write_bytes(b"compressed-data")
+            self.assertEqual(folder_size(archive), len(b"compressed-data"))
 
 
 if __name__ == "__main__":
