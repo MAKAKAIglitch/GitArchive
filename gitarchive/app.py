@@ -13,10 +13,12 @@ from typing import Any
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal, QEasingCurve, QPropertyAnimation
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from .repository import archive_path, find_7zip, folder_size, human_size, parse_git_url
 from .i18n import tr
+from .throttle import ProxyConfigurationError, ThrottledHttpProxy, normalize_download_limit
+from urllib.parse import urlsplit
 from .priority import (
     apply_memory_priority_to_handle,
     normalize_cpu_priority,
@@ -110,6 +112,7 @@ def defaults() -> dict:
         "max_storage_gb": 100,
         "sync_interval_minutes": 10,
         "max_parallel": 3,
+        "sync_download_limit_mbps": 3,
         "theme": "system",
         "close_to_tray": True,
         "start_with_windows": False,
@@ -163,7 +166,7 @@ def proxy_url(config: dict) -> str | None:
     return f"{schemes[proxy_type]}://{host}:{port}"
 
 
-def background_process_environment(config: dict) -> QProcessEnvironment:
+def background_process_environment(config: dict, throttle_proxy_url: str | None = None) -> QProcessEnvironment:
     """Pass resource and optional proxy preferences to the Rust background engine."""
     environment = QProcessEnvironment.systemEnvironment()
     environment.insert(
@@ -174,15 +177,27 @@ def background_process_environment(config: dict) -> QProcessEnvironment:
         "GITARCHIVE_MEMORY_PRIORITY",
         normalize_memory_priority(config.get("background_memory_priority", "very_low")),
     )
-    proxy = proxy_url(config)
-    if proxy:
-        try:
-            config_count = max(0, int(environment.value("GIT_CONFIG_COUNT") or "0"))
-        except ValueError:
-            config_count = 0
-        environment.insert("GIT_CONFIG_COUNT", str(config_count + 1))
-        environment.insert(f"GIT_CONFIG_KEY_{config_count}", "http.proxy")
-        environment.insert(f"GIT_CONFIG_VALUE_{config_count}", proxy)
+    environment.remove("GITARCHIVE_HTTP_PROXY")
+    if throttle_proxy_url:
+        environment.insert("GITARCHIVE_HTTP_PROXY", throttle_proxy_url)
+        # The local proxy applies NO_PROXY itself and chains to the configured
+        # upstream proxy. Prevent libcurl from bypassing that local limiter.
+        for key in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "all_proxy",
+            "NO_PROXY", "no_proxy",
+        ):
+            environment.remove(key)
+    else:
+        proxy = proxy_url(config)
+        if proxy:
+            try:
+                config_count = max(0, int(environment.value("GIT_CONFIG_COUNT") or "0"))
+            except ValueError:
+                config_count = 0
+            environment.insert("GIT_CONFIG_COUNT", str(config_count + 1))
+            environment.insert(f"GIT_CONFIG_KEY_{config_count}", "http.proxy")
+            environment.insert(f"GIT_CONFIG_VALUE_{config_count}", proxy)
     return environment
 
 
@@ -201,6 +216,9 @@ def load_config() -> dict:
             config["new_storage_format"] = "folder"
         if str(config.get("compression_level", "medium")).lower() not in {"min", "medium", "max"}:
             config["compression_level"] = "medium"
+        config["sync_download_limit_mbps"] = normalize_download_limit(
+            config.get("sync_download_limit_mbps", 3)
+        )
         config["background_cpu_priority"] = normalize_cpu_priority(
             config.get("background_cpu_priority", "idle")
         )
@@ -937,6 +955,7 @@ class GitArchiveWindow(QMainWindow):
         self.lan_dialog: LanPeerDialog | None = None
         self.history_workers: list[GitCommand] = []
         self.seven_zip_path = find_7zip()
+        self.download_proxy: ThrottledHttpProxy | None = None
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
         self.sync_batch_errors = 0
@@ -1030,6 +1049,10 @@ class GitArchiveWindow(QMainWindow):
         self.sidebar_sync_bar.setValue(0)
         self.sidebar_sync_bar.setTextVisible(False)
         self.sidebar_sync_bar.setFixedHeight(6)
+        self.sidebar_progress_animation = QPropertyAnimation(self.sidebar_sync_bar, b"value", self)
+        self.sidebar_progress_animation.setDuration(280)
+        self.sidebar_progress_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.sidebar_progress_animation.finished.connect(self._hide_sidebar_progress_if_complete)
         self.sidebar_sync_detail = QLabel(tr("Добавь репозиторий"))
         self.sidebar_sync_detail.setObjectName("Muted")
         self.sidebar_sync_detail.setWordWrap(True)
@@ -1037,7 +1060,9 @@ class GitArchiveWindow(QMainWindow):
         sync_layout.addWidget(self.sidebar_sync_label)
         sync_layout.addWidget(self.sidebar_sync_bar)
         sync_layout.addWidget(self.sidebar_sync_detail)
+        self.sidebar_sync_card = sync_card
         side.addWidget(sync_card)
+        sync_card.hide()
         side.addSpacing(12)
 
         footer = QLabel("LOCAL-FIRST ARCHIVER\nGit mirrors stay on this PC")
@@ -1186,6 +1211,18 @@ class GitArchiveWindow(QMainWindow):
         self.parallel.setRange(1, 8)
         self.parallel.setValue(int(self.config["max_parallel"]))
         form.addRow(tr("Параллельные задачи"), self.parallel)
+        self.download_limit = QSpinBox()
+        self.download_limit.setRange(0, 100)
+        self.download_limit.setSuffix(tr(" МБ/с"))
+        self.download_limit.setSpecialValueText(tr("Без ограничений"))
+        self.download_limit.setValue(normalize_download_limit(self.config.get("sync_download_limit_mbps", 3)))
+        form.addRow(tr("Лимит загрузки HTTPS"), self.download_limit)
+        download_limit_note = QLabel(
+            tr("0 — без ограничений. Общий лимит для всех активных HTTPS-синхронизаций. SSH не ограничивается.")
+        )
+        download_limit_note.setObjectName("Muted")
+        download_limit_note.setWordWrap(True)
+        form.addRow("", download_limit_note)
 
         self.storage_format = QComboBox()
         self.storage_format.addItem(tr("Папка .git — без сжатия"), "folder")
@@ -1363,6 +1400,9 @@ class GitArchiveWindow(QMainWindow):
         self.allow_exit = True
         self.flush_logs()
         self.lan_service.stop()
+        if self.download_proxy is not None:
+            self.download_proxy.close()
+            self.download_proxy = None
         for process in list(self.processes.values()):
             if process.state() != QProcess.ProcessState.NotRunning:
                 process.terminate()
@@ -1777,6 +1817,75 @@ class GitArchiveWindow(QMainWindow):
         self.start_queued()
         self.refresh()
 
+    def _configured_https_proxy(self, remote_url: str) -> str | None:
+        """Resolve the same upstream proxy Git would use for this HTTPS remote."""
+        if self.config.get("proxy_enabled"):
+            return proxy_url(self.config)
+
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get-urlmatch", "http.proxy", remote_url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+                check=False,
+            )
+            configured = result.stdout.strip() if result.returncode == 0 else ""
+            if configured:
+                return configured
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
+            value = os.environ.get(key, "").strip()
+            if value:
+                if value.lower().startswith("socks5://"):
+                    value = "socks5h://" + value[9:]
+                elif value.lower().startswith("socks4://"):
+                    value = "socks4a://" + value[9:]
+                return value
+        return None
+
+    def prepare_download_proxy(self, remote_url: str) -> str | None:
+        """Return the local aggregate limiter URL for HTTPS remotes only."""
+        limit_mbps = normalize_download_limit(self.config.get("sync_download_limit_mbps", 3))
+        if limit_mbps <= 0:
+            return None
+        try:
+            parsed = urlsplit(remote_url)
+            if parsed.scheme.lower() != "https" or not parsed.hostname:
+                return None
+            port = parsed.port or 443
+            no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+            if self.download_proxy is None:
+                self.download_proxy = ThrottledHttpProxy(limit_mbps * 1_000_000, no_proxy)
+            else:
+                self.download_proxy.set_limit(limit_mbps * 1_000_000)
+                self.download_proxy.set_upstream_proxy(None, no_proxy)
+            upstream = self._configured_https_proxy(remote_url)
+            self.download_proxy.set_route(parsed.hostname, port, upstream)
+            return self.download_proxy.start()
+        except (OSError, ValueError, RuntimeError, ProxyConfigurationError) as error:
+            self.log(
+                tr("Ограничение скорости не удалось включить; синхронизация продолжится без него: {}").format(
+                    str(error)[:240]
+                )
+            )
+            return None
+
+    def _hide_sidebar_progress_if_complete(self) -> None:
+        if (
+            not self.processes
+            and not self.queue
+            and not self.sync_batch_paused
+            and self.sync_batch_total <= self.sync_batch_completed
+        ):
+            self.sidebar_sync_card.hide()
+
     def start_queued(self) -> None:
         if self.size_scan_running or not self.size_scan_ready:
             return
@@ -1828,7 +1937,8 @@ class GitArchiveWindow(QMainWindow):
 
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-            process.setProcessEnvironment(background_process_environment(self.config))
+            throttle_url = self.prepare_download_proxy(str(repo.get("url") or ""))
+            process.setProcessEnvironment(background_process_environment(self.config, throttle_url))
             process.readyReadStandardOutput.connect(lambda p=process: self.read_output(p))
             process.started.connect(lambda p=process: self.sync_process_started(p))
             process.finished.connect(lambda code, _status, p=process: self.finished(p, code))
@@ -1946,15 +2056,36 @@ class GitArchiveWindow(QMainWindow):
         completed = min(self.sync_batch_completed, total)
 
         if total <= 0:
+            self.sidebar_progress_animation.stop()
             self.sidebar_sync_bar.setValue(0)
-            if not self.config["repositories"]:
-                self.sidebar_sync_label.setText(tr("Пока нет репозиториев"))
-                self.sidebar_sync_detail.setText(tr("Добавь Git-репозиторий"))
-            else:
-                self.sidebar_sync_label.setText(tr("Ожидание синхронизации"))
+            self.sidebar_sync_card.hide()
+            return
+
+        # Keep the widget visible only while a batch is active or deliberately paused.
+        self.sidebar_sync_card.show()
+        if active_count == 0 and queued_count == 0 and completed >= total:
+            if self.sync_batch_paused:
+                target = 99
+                self.sidebar_sync_label.setText(tr("Пауза · лимит хранилища"))
+                self.sidebar_sync_detail.setText(tr("Часть задач ожидает освобождения места"))
+            elif self.sync_batch_errors:
+                target = 100
+                success_count = max(0, completed - self.sync_batch_errors)
+                self.sidebar_sync_label.setText(tr("Завершено с ошибками"))
                 self.sidebar_sync_detail.setText(
-                    tr(f"Репозиториев: {len(self.config['repositories'])}")
+                    tr(f"{success_count} успешно · {self.sync_batch_errors} ошибок")
                 )
+            else:
+                target = 100
+                self.sidebar_sync_label.setText(tr("Синхронизация завершена"))
+                self.sidebar_sync_detail.setText(tr(f"{completed} из {total} репозиториев"))
+
+            self.sidebar_progress_animation.stop()
+            self.sidebar_progress_animation.setStartValue(self.sidebar_sync_bar.value())
+            self.sidebar_progress_animation.setEndValue(target)
+            self.sidebar_progress_animation.start()
+            if target == 100 and self.sidebar_sync_bar.value() == 100:
+                self._hide_sidebar_progress_if_complete()
             return
 
         active_percent = sum(
@@ -1962,23 +2093,13 @@ class GitArchiveWindow(QMainWindow):
             for repo_id in active_ids
         )
         overall = int(round((completed * 100 + active_percent) / total))
-        overall = max(0, min(100, overall))
-        self.sidebar_sync_bar.setValue(overall)
+        # A batch is not complete while any repository is running or queued.
+        overall = max(0, min(99, overall))
 
-        if active_count == 0 and queued_count == 0 and completed >= total:
-            if self.sync_batch_paused:
-                self.sidebar_sync_label.setText(tr("Пауза · лимит хранилища"))
-                self.sidebar_sync_detail.setText(tr("Часть задач ожидает освобождения места"))
-            elif self.sync_batch_errors:
-                self.sidebar_sync_label.setText(tr("Завершено с ошибками"))
-                success_count = max(0, completed - self.sync_batch_errors)
-                self.sidebar_sync_detail.setText(
-                    tr(f"{success_count} успешно · {self.sync_batch_errors} ошибок")
-                )
-            else:
-                self.sidebar_sync_label.setText(tr("Синхронизация завершена"))
-                self.sidebar_sync_detail.setText(tr(f"{completed} из {total} репозиториев"))
-            return
+        self.sidebar_progress_animation.stop()
+        self.sidebar_progress_animation.setStartValue(self.sidebar_sync_bar.value())
+        self.sidebar_progress_animation.setEndValue(overall)
+        self.sidebar_progress_animation.start()
 
         if active_count:
             self.sidebar_sync_label.setText(tr(f"Синхронизация · {overall}%"))
@@ -2194,6 +2315,7 @@ class GitArchiveWindow(QMainWindow):
             "max_storage_gb": self.limit.value(),
             "sync_interval_minutes": self.interval.value(),
             "max_parallel": self.parallel.value(),
+            "sync_download_limit_mbps": self.download_limit.value(),
             "new_storage_format": new_storage_format,
             "compression_level": compression_level,
             "background_cpu_priority": str(self.cpu_priority.currentData()),
@@ -2213,6 +2335,8 @@ class GitArchiveWindow(QMainWindow):
             QMessageBox.warning(self, tr("Настройки не применены"), str(error))
             return
         save_config(self.config)
+        if self.download_proxy is not None:
+            self.download_proxy.set_limit(self.download_limit.value() * 1_000_000)
         self.sync_timer.setInterval(self.interval.value() * 60000)
         self.apply_theme()
         self.refresh()
