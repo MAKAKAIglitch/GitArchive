@@ -14,13 +14,19 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from .repository import archive_path, find_7zip, folder_size, human_size, parse_git_url
+from .priority import (
+    apply_memory_priority_to_handle,
+    normalize_cpu_priority,
+    normalize_memory_priority,
+    process_creation_flags,
+)
 
 from PySide6.QtSvg import QSvgRenderer
 
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
     QStackedWidget, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
     QTextEdit, QVBoxLayout, QWidget,
 )
@@ -76,6 +82,8 @@ def defaults() -> dict:
         "storage_path": str(Path.home() / "GitArchive"),
         "new_storage_format": "folder",
         "compression_level": "medium",
+        "background_cpu_priority": "idle",
+        "background_memory_priority": "very_low",
         "max_storage_gb": 100,
         "sync_interval_minutes": 10,
         "max_parallel": 3,
@@ -132,6 +140,29 @@ def proxy_url(config: dict) -> str | None:
     return f"{schemes[proxy_type]}://{host}:{port}"
 
 
+def background_process_environment(config: dict) -> QProcessEnvironment:
+    """Pass resource and optional proxy preferences to the Rust background engine."""
+    environment = QProcessEnvironment.systemEnvironment()
+    environment.insert(
+        "GITARCHIVE_CPU_PRIORITY",
+        normalize_cpu_priority(config.get("background_cpu_priority", "idle")),
+    )
+    environment.insert(
+        "GITARCHIVE_MEMORY_PRIORITY",
+        normalize_memory_priority(config.get("background_memory_priority", "very_low")),
+    )
+    proxy = proxy_url(config)
+    if proxy:
+        try:
+            config_count = max(0, int(environment.value("GIT_CONFIG_COUNT") or "0"))
+        except ValueError:
+            config_count = 0
+        environment.insert("GIT_CONFIG_COUNT", str(config_count + 1))
+        environment.insert(f"GIT_CONFIG_KEY_{config_count}", "http.proxy")
+        environment.insert(f"GIT_CONFIG_VALUE_{config_count}", proxy)
+    return environment
+
+
 def load_config() -> dict:
     path = data_dir() / "config.json"
     if not path.exists():
@@ -147,6 +178,12 @@ def load_config() -> dict:
             config["new_storage_format"] = "folder"
         if str(config.get("compression_level", "medium")).lower() not in {"min", "medium", "max"}:
             config["compression_level"] = "medium"
+        config["background_cpu_priority"] = normalize_cpu_priority(
+            config.get("background_cpu_priority", "idle")
+        )
+        config["background_memory_priority"] = normalize_memory_priority(
+            config.get("background_memory_priority", "very_low")
+        )
         return config
     except (OSError, ValueError):
         return defaults()
@@ -166,38 +203,68 @@ class GitCommandSignals(QObject):
 class GitCommand(QRunnable):
     """Run local Git inspection/export commands without blocking the UI thread."""
 
-    def __init__(self, args: list[str], timeout: int = 120) -> None:
+    def __init__(
+        self,
+        args: list[str],
+        timeout: int = 120,
+        cpu_priority: str = "idle",
+        memory_priority: str = "very_low",
+    ) -> None:
         super().__init__()
         self.args = args
         self.timeout = timeout
+        self.cpu_priority = normalize_cpu_priority(cpu_priority)
+        self.memory_priority = normalize_memory_priority(memory_priority)
         self.signals = GitCommandSignals()
 
     def run(self) -> None:
+        process = None
         try:
-            result = subprocess.run(
+            environment = os.environ.copy()
+            environment["GITARCHIVE_CPU_PRIORITY"] = self.cpu_priority
+            environment["GITARCHIVE_MEMORY_PRIORITY"] = self.memory_priority
+            process = subprocess.Popen(
                 self.args,
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=self.timeout,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=environment,
+                creationflags=process_creation_flags(self.cpu_priority),
             )
-            stdout = result.stdout
+            apply_memory_priority_to_handle(process._handle, self.memory_priority)
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise subprocess.TimeoutExpired(self.args, self.timeout, output=stdout, stderr=stderr)
+
             if len(stdout) > 1_500_000:
                 stdout = stdout[:1_500_000] + "\n\n[GitArchive] Вывод обрезан после 1,5 МБ. Полный коммит остаётся в локальном архиве."
-            self.signals.completed.emit(result.returncode, stdout, result.stderr)
+            self.signals.completed.emit(process.returncode, stdout, stderr)
         except (OSError, subprocess.TimeoutExpired) as error:
             self.signals.completed.emit(-1, "", str(error))
 
 
 class CommitHistoryDialog(QDialog):
-    def __init__(self, archive: Path, repo_name: str, pool: QThreadPool, parent=None) -> None:
+    def __init__(
+        self,
+        archive: Path,
+        repo_name: str,
+        pool: QThreadPool,
+        parent=None,
+        cpu_priority: str = "idle",
+        memory_priority: str = "very_low",
+    ) -> None:
         super().__init__(parent)
         self.archive = archive
         self.repo_name = repo_name
         self.pool = pool
+        self.cpu_priority = normalize_cpu_priority(cpu_priority)
+        self.memory_priority = normalize_memory_priority(memory_priority)
         self.workers: list[GitCommand] = []
         self.dialog_open = True
         self.cleanup_path: Path | None = None
@@ -236,7 +303,12 @@ class CommitHistoryDialog(QDialog):
         self.load_history()
 
     def run_git(self, args: list[str], callback, timeout: int = 120) -> None:
-        worker = GitCommand(args, timeout)
+        worker = GitCommand(
+            args,
+            timeout,
+            cpu_priority=self.cpu_priority,
+            memory_priority=self.memory_priority,
+        )
         self.workers.append(worker)
         worker.signals.completed.connect(
             lambda code, stdout, stderr, w=worker: self._worker_done(w, callback, code, stdout, stderr)
@@ -425,6 +497,9 @@ class GitArchiveWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.history_workers: list[GitCommand] = []
         self.seven_zip_path = find_7zip()
+        self.sync_batch_total = 0
+        self.sync_batch_completed = 0
+        self.sync_progress: dict[str, dict[str, object]] = {}
         self.allow_exit = False
         self.dark = True
         self.accent = "#60a5fa"
@@ -494,6 +569,32 @@ class GitArchiveWindow(QMainWindow):
             side.addWidget(button)
         self.nav[0].setChecked(True)
         side.addStretch(1)
+
+        sync_card = QFrame()
+        sync_card.setObjectName("Card")
+        sync_layout = QVBoxLayout(sync_card)
+        sync_layout.setContentsMargins(10, 10, 10, 10)
+        sync_layout.setSpacing(7)
+        sync_title = QLabel("СИНХРОНИЗАЦИЯ")
+        sync_title.setObjectName("Muted")
+        self.sidebar_sync_label = QLabel("Ожидание синхронизации")
+        self.sidebar_sync_label.setWordWrap(True)
+        self.sidebar_sync_label.setStyleSheet("font-weight:600;")
+        self.sidebar_sync_bar = QProgressBar()
+        self.sidebar_sync_bar.setRange(0, 100)
+        self.sidebar_sync_bar.setValue(0)
+        self.sidebar_sync_bar.setTextVisible(False)
+        self.sidebar_sync_bar.setFixedHeight(6)
+        self.sidebar_sync_detail = QLabel("Добавь репозиторий")
+        self.sidebar_sync_detail.setObjectName("Muted")
+        self.sidebar_sync_detail.setWordWrap(True)
+        sync_layout.addWidget(sync_title)
+        sync_layout.addWidget(self.sidebar_sync_label)
+        sync_layout.addWidget(self.sidebar_sync_bar)
+        sync_layout.addWidget(self.sidebar_sync_detail)
+        side.addWidget(sync_card)
+        side.addSpacing(12)
+
         footer = QLabel("LOCAL-FIRST ARCHIVER\nGit mirrors stay on this PC")
         footer.setObjectName("Muted")
         side.addWidget(footer)
@@ -660,6 +761,32 @@ class GitArchiveWindow(QMainWindow):
         form.addRow("", self.compression_note)
         self.storage_format.currentIndexChanged.connect(self.update_storage_format_controls)
         self.update_storage_format_controls()
+
+        self.cpu_priority = QComboBox()
+        self.cpu_priority.addItem("Минимальный — Idle", "idle")
+        self.cpu_priority.addItem("Ниже обычного", "below_normal")
+        self.cpu_priority.addItem("Обычный", "normal")
+        saved_cpu_priority = normalize_cpu_priority(self.config.get("background_cpu_priority", "idle"))
+        self.cpu_priority.setCurrentIndex(max(0, self.cpu_priority.findData(saved_cpu_priority)))
+        form.addRow("Приоритет ЦП фоновых задач", self.cpu_priority)
+
+        self.memory_priority = QComboBox()
+        self.memory_priority.addItem("Минимальный", "very_low")
+        self.memory_priority.addItem("Низкий", "low")
+        self.memory_priority.addItem("Обычный", "normal")
+        saved_memory_priority = normalize_memory_priority(
+            self.config.get("background_memory_priority", "very_low")
+        )
+        self.memory_priority.setCurrentIndex(max(0, self.memory_priority.findData(saved_memory_priority)))
+        form.addRow("Приоритет памяти фоновых задач", self.memory_priority)
+
+        priority_note = QLabel(
+            "Настройки применяются к Rust-движку, Git и 7-Zip. Сам интерфейс остаётся с обычным приоритетом. "
+            "Приоритет памяти влияет на вытеснение страниц из ОЗУ, но не ограничивает объём выделенной памяти."
+        )
+        priority_note.setObjectName("Muted")
+        priority_note.setWordWrap(True)
+        form.addRow("", priority_note)
 
         self.theme = QComboBox()
         for label, value in (("Как в Windows", "system"), ("Светлая", "light"), ("Тёмная", "dark")):
@@ -920,13 +1047,18 @@ class GitArchiveWindow(QMainWindow):
             return
 
         temporary_root = Path(tempfile.mkdtemp(prefix=".gitarchive-history-", dir=str(archive.parent)))
-        worker = GitCommand([
-            str(self.core), "materialize",
-            "--archive", str(archive),
-            "--destination", str(temporary_root),
-            "--storage-format", storage_format,
-            "--seven-zip", seven_zip,
-        ], timeout=3600)
+        worker = GitCommand(
+            [
+                str(self.core), "materialize",
+                "--archive", str(archive),
+                "--destination", str(temporary_root),
+                "--storage-format", storage_format,
+                "--seven-zip", seven_zip,
+            ],
+            timeout=3600,
+            cpu_priority=self.config.get("background_cpu_priority", "idle"),
+            memory_priority=self.config.get("background_memory_priority", "very_low"),
+        )
         self.history_workers.append(worker)
         worker.signals.completed.connect(
             lambda code, stdout, stderr, w=worker, root=temporary_root, name=repo.get("name", "repository"):
@@ -963,7 +1095,12 @@ class GitArchiveWindow(QMainWindow):
         cleanup_root: Path | None = None,
     ) -> None:
         dialog = CommitHistoryDialog(
-            archive, repo_name, self.thread_pool, self
+            archive,
+            repo_name,
+            self.thread_pool,
+            self,
+            cpu_priority=self.config.get("background_cpu_priority", "idle"),
+            memory_priority=self.config.get("background_memory_priority", "very_low"),
         )
         dialog.setStyleSheet(self.styleSheet())
         try:
@@ -1056,6 +1193,7 @@ class GitArchiveWindow(QMainWindow):
 
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.setProcessEnvironment(background_process_environment(self.config))
         process.readyReadStandardOutput.connect(lambda p=process: self.read_restore_output(p))
         process.finished.connect(lambda code, _status, p=process: self.restore_finished(p, code))
         process.errorOccurred.connect(lambda error, p=process: self.restore_error(p, error))
@@ -1189,17 +1327,7 @@ class GitArchiveWindow(QMainWindow):
 
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-            proxy = proxy_url(self.config)
-            if proxy:
-                environment = QProcessEnvironment.systemEnvironment()
-                try:
-                    config_count = max(0, int(environment.value("GIT_CONFIG_COUNT") or "0"))
-                except ValueError:
-                    config_count = 0
-                environment.insert("GIT_CONFIG_COUNT", str(config_count + 1))
-                environment.insert(f"GIT_CONFIG_KEY_{config_count}", "http.proxy")
-                environment.insert(f"GIT_CONFIG_VALUE_{config_count}", proxy)
-                process.setProcessEnvironment(environment)
+            process.setProcessEnvironment(background_process_environment(self.config))
             process.readyReadStandardOutput.connect(lambda p=process: self.read_output(p))
             process.finished.connect(lambda code, _status, p=process: self.finished(p, code))
             process.errorOccurred.connect(lambda error, p=process: self.process_error(p, error))
@@ -1421,6 +1549,8 @@ class GitArchiveWindow(QMainWindow):
             "max_parallel": self.parallel.value(),
             "new_storage_format": new_storage_format,
             "compression_level": compression_level,
+            "background_cpu_priority": str(self.cpu_priority.currentData()),
+            "background_memory_priority": str(self.memory_priority.currentData()),
             "theme": self.theme.currentData(),
             "start_with_windows": self.start_with_windows.isChecked(),
             "close_to_tray": self.close_to_tray.isChecked(),
