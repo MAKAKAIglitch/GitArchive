@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -182,23 +183,64 @@ def _safe_path_component(value: str) -> str:
     return f"_{value}" if device_stem in _WINDOWS_RESERVED_NAMES else value
 
 
-def archive_path(storage_root: Path, host: str, namespace: str, name: str) -> Path:
-    """Build a collision-safe archive path; keep legacy GitHub paths unchanged."""
+def archive_path(
+    storage_root: Path,
+    host: str,
+    namespace: str,
+    name: str,
+    storage_format: str = "folder",
+) -> Path:
+    """Build a collision-safe path for a bare mirror or compressed mirror."""
+    extensions = {"folder": ".git", "directory": ".git", "git": ".git", "zip": ".zip", "7z": ".7z"}
+    extension = extensions.get(str(storage_format).lower())
+    if extension is None:
+        raise ValueError("Неизвестный формат хранения. Используй folder, zip или 7z.")
     components = [_safe_path_component(part) for part in namespace.split("/")]
     safe_name = _safe_path_component(name)
     if host == "github.com":
-        return storage_root.joinpath(*components, f"{safe_name}.git")
+        return storage_root.joinpath(*components, f"{safe_name}{extension}")
 
     safe_host = re.sub(r"[^A-Za-z0-9.-]+", "_", host.lower()).strip("._")
     if not safe_host:
         raise ValueError("Некорректное имя Git-сервера.")
     safe_host = _safe_path_component(safe_host)
-    return storage_root / "_custom" / safe_host / Path(*components) / f"{safe_name}.git"
+    return storage_root / "_custom" / safe_host / Path(*components) / f"{safe_name}{extension}"
+
+
+def find_7zip() -> str | None:
+    """Find an installed 7-Zip command-line executable without downloading or bundling it."""
+    names = ("7z.exe", "7zz.exe", "7z", "7zz") if os.name == "nt" else ("7zz", "7z")
+    for name in names:
+        executable = shutil.which(name)
+        if executable and Path(executable).is_file():
+            return str(Path(executable).resolve())
+
+    if os.name == "nt":
+        roots = []
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            value = os.environ.get(variable)
+            if value:
+                roots.append(Path(value))
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            roots.append(Path(local_app_data) / "Programs")
+        for root in roots:
+            candidate = root / "7-Zip" / "7z.exe"
+            if candidate.is_file():
+                return str(candidate.resolve())
+    return None
 
 
 def folder_size(path: Path) -> int:
-    """Return the total size of files under a directory without following symlinks."""
-    if str(path) in {"", "."} or not path.is_dir():
+    """Return the size of an archive file or the total size of a directory tree."""
+    if str(path) in {"", "."}:
+        return 0
+    try:
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
+    if not path.is_dir():
         return 0
 
     total = 0
