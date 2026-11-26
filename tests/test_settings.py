@@ -1,7 +1,8 @@
 import unittest
 
-from gitarchive.app import parse_sync_progress, proxy_url
+from gitarchive.app import background_process_environment, parse_sync_progress, proxy_url
 from gitarchive.i18n import tr
+from gitarchive.throttle import normalize_download_limit
 
 
 class ProxySettingsTests(unittest.TestCase):
@@ -39,6 +40,30 @@ class ProxySettingsTests(unittest.TestCase):
     def test_rejects_invalid_port(self):
         with self.assertRaises(ValueError):
             proxy_url({"proxy_enabled": True, "proxy_type": "HTTP", "proxy_host": "localhost", "proxy_port": 70000})
+
+
+class DownloadLimitTests(unittest.TestCase):
+    def test_download_limit_defaults_to_three_megabytes_per_second(self):
+        self.assertEqual(normalize_download_limit(None), 3)
+        self.assertEqual(normalize_download_limit("invalid"), 3)
+
+    def test_zero_means_unlimited(self):
+        self.assertEqual(normalize_download_limit(0), 0)
+
+    def test_download_limit_is_clamped(self):
+        self.assertEqual(normalize_download_limit(-5), 0)
+        self.assertEqual(normalize_download_limit(150), 100)
+
+    def test_local_limiter_proxy_is_passed_to_the_rust_engine(self):
+        proxy = "http://127.0.0.1:45678"
+        environment = background_process_environment({"proxy_enabled": False}, proxy)
+        self.assertEqual(environment.value("GITARCHIVE_HTTP_PROXY"), proxy)
+        for name in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "all_proxy",
+            "NO_PROXY", "no_proxy",
+        ):
+            self.assertFalse(environment.contains(name), name)
 
 
 class SyncProgressTests(unittest.TestCase):
