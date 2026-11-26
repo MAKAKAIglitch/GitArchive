@@ -8,7 +8,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 
-_SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+")
+_SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_.~+-]+")
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 _SCP_URL = re.compile(r"^(?P<user>[A-Za-z0-9_.-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>.+)$")
 _WEB_ROUTES = {
     "archive", "blob", "browse", "commit", "commits", "compare",
@@ -168,16 +173,25 @@ def parse_github_url(value: str) -> tuple[str, str, str]:
     return url, namespace, name
 
 
+def _safe_path_component(value: str) -> str:
+    """Avoid Windows reserved device names and trailing-dot aliases."""
+    value = value.rstrip(".") or "_"
+    device_stem = value.split(".", 1)[0].upper()
+    return f"_{value}" if device_stem in _WINDOWS_RESERVED_NAMES else value
+
+
 def archive_path(storage_root: Path, host: str, namespace: str, name: str) -> Path:
     """Build a collision-safe archive path; keep legacy GitHub paths unchanged."""
-    components = namespace.split("/")
+    components = [_safe_path_component(part) for part in namespace.split("/")]
+    safe_name = _safe_path_component(name)
     if host == "github.com":
-        return storage_root.joinpath(*components, f"{name}.git")
+        return storage_root.joinpath(*components, f"{safe_name}.git")
 
     safe_host = re.sub(r"[^A-Za-z0-9.-]+", "_", host.lower()).strip("._")
     if not safe_host:
         raise ValueError("Некорректное имя Git-сервера.")
-    return storage_root / "_custom" / safe_host / Path(*components) / f"{name}.git"
+    safe_host = _safe_path_component(safe_host)
+    return storage_root / "_custom" / safe_host / Path(*components) / f"{safe_name}.git"
 
 
 def folder_size(path: Path) -> int:
