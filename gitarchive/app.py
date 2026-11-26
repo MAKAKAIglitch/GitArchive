@@ -178,7 +178,7 @@ class GitArchiveWindow(QMainWindow):
         self.config = load_config()
         self.processes: dict[str, QProcess] = {}
         self.queue: list[str] = []
-        self.logs: list[str] = []
+        self.logs: list[str] = self.load_logs()
         self.size_cache: dict[str, int] = {}
         self.size_scan_running = False
         self.size_scan_ready = False
@@ -336,6 +336,8 @@ class GitArchiveWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("Log")
         self.log_view.setPlaceholderText("События синхронизации появятся здесь.")
+        self.log_view.setPlainText("\n".join(self.logs))
+        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
         a.addWidget(self.log_view)
         self.pages.addWidget(activity)
 
@@ -666,9 +668,32 @@ class GitArchiveWindow(QMainWindow):
             table.resizeRowsToContents()
         self.hint.setText(f"Занято {human_size(size)} из {self.config['max_storage_gb']} ГБ. Архивы не удаляются при недоступности исходного проекта.")
 
+    def load_logs(self) -> list[str]:
+        path = data_dir() / "logs" / "gitarchive.log"
+        try:
+            return path.read_text(encoding="utf-8").splitlines()[-1200:]
+        except OSError:
+            return []
+
     def log(self, message: str) -> None:
-        self.logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {message}")
+        line = f"[{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+        self.logs.append(line)
         self.logs = self.logs[-1200:]
+
+        # Keep one small rotated log locally; no telemetry or remote uploads.
+        try:
+            log_dir = data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "gitarchive.log"
+            if log_path.exists() and log_path.stat().st_size > 2 * 1024 * 1024:
+                rotated = log_dir / "gitarchive.log.1"
+                rotated.unlink(missing_ok=True)
+                log_path.replace(rotated)
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
+        except OSError:
+            pass
+
         if hasattr(self, "log_view"):
             self.log_view.setPlainText("\n".join(self.logs))
             self.log_view.moveCursor(QTextCursor.MoveOperation.End)
