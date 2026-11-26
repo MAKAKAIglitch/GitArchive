@@ -1025,9 +1025,10 @@ mod tests {
         git(["-C", work.to_str().unwrap(), "push", "--force", "origin", "main"]);
         git(["-C", work.to_str().unwrap(), "push", "origin", ":topic"]);
 
-        fetch_existing_mirror(&archive)
+        let changed = fetch_existing_mirror(&archive)
             .await
             .expect("mirror update should succeed");
+        assert!(changed, "a force-pushed ref should trigger an archive repack");
 
         assert_eq!(git_dir(&archive, &["rev-parse", "refs/heads/main"]), third);
         assert_eq!(
@@ -1052,9 +1053,10 @@ mod tests {
             "the deleted branch tip must also be snapshotted"
         );
 
-        fetch_existing_mirror(&archive)
+        let changed = fetch_existing_mirror(&archive)
             .await
             .expect("second mirror update should succeed");
+        assert!(!changed, "an unchanged remote must not require a compressed archive repack");
         let snapshots_after_second = git_dir(
             &archive,
             &["for-each-ref", "--format=%(refname)", "refs/gitarchive/snapshots"],
