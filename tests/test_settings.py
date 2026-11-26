@@ -1,6 +1,6 @@
 import unittest
 
-from gitarchive.app import proxy_url
+from gitarchive.app import parse_sync_progress, proxy_url
 
 
 class ProxySettingsTests(unittest.TestCase):
@@ -38,6 +38,31 @@ class ProxySettingsTests(unittest.TestCase):
     def test_rejects_invalid_port(self):
         with self.assertRaises(ValueError):
             proxy_url({"proxy_enabled": True, "proxy_type": "HTTP", "proxy_host": "localhost", "proxy_port": 70000})
+
+
+
+
+class SyncProgressTests(unittest.TestCase):
+    def test_parses_git_receiving_objects_progress(self):
+        self.assertEqual(
+            parse_sync_progress("Receiving objects:  42% (21/50), 1.2 MiB"),
+            (42, "Receiving objects"),
+        )
+
+    def test_parses_git_resolving_deltas_progress(self):
+        self.assertEqual(
+            parse_sync_progress("Resolving deltas: 100% (8/8)"),
+            (100, "Resolving deltas"),
+        )
+
+    def test_parses_seven_zip_percentage_output(self):
+        self.assertEqual(
+            parse_sync_progress("  67%\r"),
+            (67, "Архивация / распаковка"),
+        )
+
+    def test_ignores_output_without_progress(self):
+        self.assertIsNone(parse_sync_progress("INFO: Fetching remote refs without pruning."))
 
 
 if __name__ == "__main__":
