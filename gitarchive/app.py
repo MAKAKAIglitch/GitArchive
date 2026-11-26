@@ -9,12 +9,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QProcess, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
 from .repository import archive_path, folder_size, human_size, parse_git_url
 
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox,
     QStackedWidget, QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
@@ -47,8 +47,55 @@ def defaults() -> dict:
         "max_parallel": 3,
         "theme": "system",
         "close_to_tray": True,
+        "start_with_windows": False,
+        "proxy_enabled": False,
+        "proxy_type": "SOCKS5",
+        "proxy_host": "127.0.0.1",
+        "proxy_port": 1080,
         "repositories": [],
     }
+
+
+def set_windows_autostart(enabled: bool) -> None:
+    """Register or remove the current app for the current Windows user only."""
+    if sys.platform != "win32":
+        if enabled:
+            raise OSError("Автозапуск Windows доступен только в Windows.")
+        return
+    import winreg
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+        if enabled:
+            if getattr(sys, "frozen", False):
+                command = subprocess.list2cmdline([sys.executable, "--background"])
+            else:
+                pythonw = Path(sys.executable).with_name("pythonw.exe")
+                executable = pythonw if pythonw.is_file() else Path(sys.executable)
+                command = subprocess.list2cmdline([str(executable), "-m", "gitarchive", "--background"])
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, command)
+        else:
+            try:
+                winreg.DeleteValue(key, APP_NAME)
+            except FileNotFoundError:
+                pass
+
+
+def proxy_url(config: dict) -> str | None:
+    if not config.get("proxy_enabled"):
+        return None
+    schemes = {"HTTP": "http", "HTTPS": "https", "SOCKS4": "socks4a", "SOCKS5": "socks5h"}
+    proxy_type = str(config.get("proxy_type", "SOCKS5")).upper()
+    if proxy_type not in schemes:
+        raise ValueError("Неизвестный тип прокси.")
+    host = str(config.get("proxy_host", "")).strip()
+    if not host or any(char.isspace() or char in "/\\@?#" for char in host):
+        raise ValueError("Укажи корректный адрес прокси без логина и пароля.")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = int(config.get("proxy_port", 0))
+    if not 1 <= port <= 65535:
+        raise ValueError("Порт прокси должен быть от 1 до 65535.")
+    return f"{schemes[proxy_type]}://{host}:{port}"
 
 
 def load_config() -> dict:
@@ -510,6 +557,32 @@ class GitArchiveWindow(QMainWindow):
             self.theme.addItem(label, value)
         self.theme.setCurrentIndex(max(0, self.theme.findData(self.config["theme"])))
         form.addRow("Тема", self.theme)
+        self.start_with_windows = QCheckBox("Запускать вместе с Windows")
+        self.start_with_windows.setChecked(bool(self.config.get("start_with_windows", False)))
+        form.addRow("Автозапуск", self.start_with_windows)
+        self.close_to_tray = QCheckBox("При закрытии сворачивать в системный трей")
+        self.close_to_tray.setChecked(bool(self.config.get("close_to_tray", True)))
+        form.addRow("Поведение окна", self.close_to_tray)
+        self.proxy_enabled = QCheckBox("Использовать прокси для HTTPS Git-соединений")
+        self.proxy_enabled.setChecked(bool(self.config.get("proxy_enabled", False)))
+        form.addRow("Прокси", self.proxy_enabled)
+        self.proxy_type = QComboBox()
+        for proxy_label in ("HTTP", "HTTPS", "SOCKS4", "SOCKS5"):
+            self.proxy_type.addItem(proxy_label, proxy_label)
+        self.proxy_type.setCurrentIndex(max(0, self.proxy_type.findData(self.config.get("proxy_type", "SOCKS5"))))
+        form.addRow("Тип прокси", self.proxy_type)
+        proxy_row = QHBoxLayout()
+        self.proxy_host = QLineEdit(str(self.config.get("proxy_host", "127.0.0.1")))
+        self.proxy_host.setPlaceholderText("Адрес прокси")
+        self.proxy_port = QSpinBox()
+        self.proxy_port.setRange(1, 65535)
+        self.proxy_port.setValue(int(self.config.get("proxy_port", 1080)))
+        self.proxy_port.setFixedWidth(120)
+        proxy_row.addWidget(self.proxy_host, 1)
+        proxy_row.addWidget(self.proxy_port)
+        proxy_widget = QWidget()
+        proxy_widget.setLayout(proxy_row)
+        form.addRow("Сервер / порт", proxy_widget)
         s.addWidget(card)
         note = QLabel("Лимит мягкий: при достижении порога новые задачи ставятся на паузу. Уже начатая загрузка может превысить его. Архивы автоматически не удаляются.")
         note.setObjectName("Muted")
@@ -872,6 +945,17 @@ class GitArchiveWindow(QMainWindow):
                 continue
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            proxy = proxy_url(self.config)
+            if proxy:
+                environment = QProcessEnvironment.systemEnvironment()
+                try:
+                    config_count = max(0, int(environment.value("GIT_CONFIG_COUNT") or "0"))
+                except ValueError:
+                    config_count = 0
+                environment.insert("GIT_CONFIG_COUNT", str(config_count + 1))
+                environment.insert(f"GIT_CONFIG_KEY_{config_count}", "http.proxy")
+                environment.insert(f"GIT_CONFIG_VALUE_{config_count}", proxy)
+                process.setProcessEnvironment(environment)
             process.readyReadStandardOutput.connect(lambda p=process: self.read_output(p))
             process.finished.connect(lambda code, _status, p=process: self.finished(p, code))
             process.errorOccurred.connect(lambda error, p=process: self.process_error(p, error))
@@ -1042,7 +1126,19 @@ class GitArchiveWindow(QMainWindow):
             "sync_interval_minutes": self.interval.value(),
             "max_parallel": self.parallel.value(),
             "theme": self.theme.currentData(),
+            "start_with_windows": self.start_with_windows.isChecked(),
+            "close_to_tray": self.close_to_tray.isChecked(),
+            "proxy_enabled": self.proxy_enabled.isChecked(),
+            "proxy_type": self.proxy_type.currentData(),
+            "proxy_host": self.proxy_host.text().strip(),
+            "proxy_port": self.proxy_port.value(),
         })
+        try:
+            proxy_url(self.config)
+            set_windows_autostart(bool(self.config["start_with_windows"]))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Настройки не применены", str(error))
+            return
         save_config(self.config)
         self.sync_timer.setInterval(self.interval.value() * 60000)
         self.apply_theme()
@@ -1113,5 +1209,6 @@ def main() -> int:
 
     window = GitArchiveWindow()
     window.instance_lock = instance_lock
-    window.show()
+    if "--background" not in sys.argv:
+        window.show()
     return app.exec()
