@@ -744,7 +744,7 @@ class GitArchiveWindow(QMainWindow):
         if not repo:
             return
         menu = QMenu(self)
-        open_history = menu.addAction("Открыть историю коммитов")
+        open_history = menu.addAction("Открыть")
         sync = menu.addAction("Обновить")
         open_folder = menu.addAction("Открыть папку архива")
         restore = menu.addAction("Восстановить рабочую копию")
