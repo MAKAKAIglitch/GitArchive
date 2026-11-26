@@ -195,6 +195,8 @@ class CommitHistoryDialog(QDialog):
         self.repo_name = repo_name
         self.pool = pool
         self.workers: list[GitCommand] = []
+        self.dialog_open = True
+        self.cleanup_path: Path | None = None
         self.commits: dict[str, dict[str, str]] = {}
         self.selected_sha: str | None = None
         self.setWindowTitle(f"История коммитов — {repo_name}")
@@ -240,7 +242,21 @@ class CommitHistoryDialog(QDialog):
     def _worker_done(self, worker, callback, code: int, stdout: str, stderr: str) -> None:
         if worker in self.workers:
             self.workers.remove(worker)
-        callback(code, stdout, stderr)
+        if self.dialog_open:
+            callback(code, stdout, stderr)
+        self._cleanup_when_idle()
+
+    def request_cleanup(self, path: Path) -> None:
+        # Keep the extracted mirror alive until every outstanding Git command
+        # has stopped using it, even if the dialog is closed during a request.
+        self.dialog_open = False
+        self.cleanup_path = path
+        self._cleanup_when_idle()
+
+    def _cleanup_when_idle(self) -> None:
+        if self.cleanup_path is not None and not self.workers:
+            shutil.rmtree(self.cleanup_path, ignore_errors=True)
+            self.cleanup_path = None
 
     def load_history(self) -> None:
         self.commit_list.clear()
@@ -934,15 +950,23 @@ class GitArchiveWindow(QMainWindow):
                 stderr or stdout or "Не удалось безопасно распаковать архив для просмотра."
             )
             return
-        self.show_commit_history(mirror, repo_name)
-        shutil.rmtree(temporary_root, ignore_errors=True)
+        self.show_commit_history(mirror, repo_name, cleanup_root=temporary_root)
 
-    def show_commit_history(self, archive: Path, repo_name: str) -> None:
+    def show_commit_history(
+        self,
+        archive: Path,
+        repo_name: str,
+        cleanup_root: Path | None = None,
+    ) -> None:
         dialog = CommitHistoryDialog(
             archive, repo_name, self.thread_pool, self
         )
         dialog.setStyleSheet(self.styleSheet())
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            if cleanup_root is not None:
+                dialog.request_cleanup(cleanup_root)
 
     def remove_repository(self, repo: dict) -> None:
         answer = QMessageBox.question(
