@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QProcess, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QProcess, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -78,7 +78,7 @@ def parse_github_url(value: str) -> tuple[str, str, str]:
     if len(parts) < 2:
         raise ValueError("Формат ссылки: https://github.com/owner/repository")
     owner, name = (re.sub(r"\.git$", "", part) for part in parts[:2])
-    if not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part or "") for part in (owner, name)):
+    if owner in {".", ".."} or name in {".", ".."} or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part or "") for part in (owner, name)):
         raise ValueError("Не удалось распознать owner/repository.")
     url = f"git@github.com:{owner}/{name}.git" if url_type == "ssh" else f"https://github.com/{owner}/{name}.git"
     return url, owner, name
@@ -104,6 +104,24 @@ def human_size(size: int) -> str:
             return f"{int(value)} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} ТБ"
+
+
+class SizeSignals(QObject):
+    completed = Signal(dict)
+
+
+class SizeScan(QRunnable):
+    def __init__(self, repositories: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.repositories = repositories
+        self.signals = SizeSignals()
+
+    def run(self) -> None:
+        result = {
+            repo_id: folder_size(Path(path))
+            for repo_id, path in self.repositories
+        }
+        self.signals.completed.emit(result)
 
 
 def windows_dark_theme() -> bool:
@@ -158,6 +176,11 @@ class GitArchiveWindow(QMainWindow):
         self.processes: dict[str, QProcess] = {}
         self.queue: list[str] = []
         self.logs: list[str] = []
+        self.size_cache: dict[str, int] = {}
+        self.size_scan_running = False
+        self.size_scan_ready = False
+        self.size_worker: SizeScan | None = None
+        self.thread_pool = QThreadPool.globalInstance()
         self.allow_exit = False
         self.dark = True
         self.accent = "#60a5fa"
@@ -169,6 +192,7 @@ class GitArchiveWindow(QMainWindow):
         self._build_tray()
         self.apply_theme()
         self.refresh()
+        self.scan_sizes()
 
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.sync_all)
@@ -500,6 +524,8 @@ class GitArchiveWindow(QMainWindow):
         self.refresh()
 
     def start_queued(self) -> None:
+        if self.size_scan_running or not self.size_scan_ready:
+            return
         maximum = max(1, int(self.config.get("max_parallel", 3)))
         while self.queue and len(self.processes) < maximum:
             if self.total_size() >= int(self.config.get("max_storage_gb", 100)) * GIB:
@@ -572,15 +598,40 @@ class GitArchiveWindow(QMainWindow):
         save_config(self.config)
         process.deleteLater()
         self.refresh()
-        self.start_queued()
+        self.scan_sizes()
 
     def find_repo(self, repo_id: str | None) -> dict | None:
         if not repo_id:
             return None
         return next((repo for repo in self.config["repositories"] if repo.get("id") == repo_id), None)
 
+    def scan_sizes(self) -> None:
+        if self.size_scan_running:
+            return
+        self.size_scan_running = True
+        self.size_scan_ready = False
+        repositories = [
+            (repo["id"], repo["local_path"])
+            for repo in self.config["repositories"]
+            if repo.get("id") and repo.get("local_path")
+        ]
+        self.size_worker = SizeScan(repositories)
+        self.size_worker.signals.completed.connect(self.size_scan_finished)
+        self.thread_pool.start(self.size_worker)
+
+    def size_scan_finished(self, result: dict) -> None:
+        self.size_cache.update(result)
+        self.size_scan_running = False
+        self.size_scan_ready = True
+        self.size_worker = None
+        if any(repo.get("id") not in result and repo.get("id") not in self.size_cache for repo in self.config["repositories"]):
+            self.scan_sizes()
+            return
+        self.refresh()
+        self.start_queued()
+
     def total_size(self) -> int:
-        return sum(folder_size(Path(repo["local_path"])) for repo in self.config["repositories"] if repo.get("local_path"))
+        return sum(self.size_cache.values())
 
     def refresh(self) -> None:
         repos = self.config["repositories"]
@@ -593,7 +644,7 @@ class GitArchiveWindow(QMainWindow):
             table.setRowCount(len(repos))
             for row, repo in enumerate(repos):
                 local = Path(repo.get("local_path", ".")) if repo.get("local_path") else Path("__missing__")
-                bytes_used = folder_size(local)
+                bytes_used = self.size_cache.get(repo.get("id"), 0)
                 last = repo.get("last_sync") or "—"
                 try:
                     if last != "—":
