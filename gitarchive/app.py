@@ -386,8 +386,11 @@ class GitArchiveWindow(QMainWindow):
 
     @property
     def core(self) -> Path:
-        root = Path(__file__).resolve().parents[1]
         name = "gitarchive-core.exe" if sys.platform == "win32" else "gitarchive-core"
+        if getattr(sys, "frozen", False):
+            root = Path(sys.executable).resolve().parent
+            return root / "rust-core" / name
+        root = Path(__file__).resolve().parents[1]
         return root / "rust-core" / "target" / "release" / name
 
     def _build_shell(self) -> None:
