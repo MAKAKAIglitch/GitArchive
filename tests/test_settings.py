@@ -40,8 +40,6 @@ class ProxySettingsTests(unittest.TestCase):
             proxy_url({"proxy_enabled": True, "proxy_type": "HTTP", "proxy_host": "localhost", "proxy_port": 70000})
 
 
-
-
 class SyncProgressTests(unittest.TestCase):
     def test_parses_git_receiving_objects_progress(self):
         self.assertEqual(
@@ -57,7 +55,7 @@ class SyncProgressTests(unittest.TestCase):
 
     def test_parses_seven_zip_percentage_output(self):
         self.assertEqual(
-            parse_sync_progress("  67%\r"),
+            parse_sync_progress("  67%\\r"),
             (67, "Архивация / распаковка"),
         )
 
