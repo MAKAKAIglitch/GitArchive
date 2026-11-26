@@ -376,12 +376,57 @@ async fn sync_folder_mirror(url: &str, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn has_custom_ssh_command(repository: Option<&Path>) -> bool {
+    if std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+    {
+        return true;
+    }
+
+    let mut probe = std::process::Command::new("git");
+    if let Some(path) = repository {
+        probe.arg("-C").arg(path);
+    }
+    probe
+        .args(["config", "--get", "core.sshCommand"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn configure_git_network_limits(command: &mut Command, repository: Option<&Path>) {
+    // Do not leave Git waiting for terminal credentials or an idle HTTP transfer.
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-c")
+        .arg("credential.interactive=false")
+        .arg("-c")
+        .arg("http.lowSpeedLimit=512")
+        .arg("-c")
+        .arg("http.lowSpeedTime=180")
+        .arg("-c")
+        .arg("http.keepAliveIdle=30")
+        .arg("-c")
+        .arg("http.keepAliveInterval=15")
+        .arg("-c")
+        .arg("http.keepAliveCount=3");
+
+    // Respect a custom SSH command. Add OpenSSH timeouts only for its default
+    // executable so existing SSH aliases / wrappers are not silently replaced.
+    if !has_custom_ssh_command(repository) {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3",
+        );
+    }
+}
 async fn clone_mirror(url: &str, destination: &Path) -> Result<()> {
     println!("INFO: Creating the first bare mirror.");
     let mut command = Command::new("git");
-    command
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["clone", "--mirror", "--progress"])
+    configure_git_network_limits(&mut command, None);
+    command.args(["clone", "--mirror", "--progress"])
         .arg(url)
         .arg(destination);
     let status = run_background_status(command)
@@ -870,14 +915,16 @@ async fn list_remote_refs(repository: &Path) -> Result<String> {
 }
 
 async fn fetch_existing_mirror(destination: &Path) -> Result<bool> {
-    println!("INFO: Existing archive found; preserving current refs before fetch.");
+    println!("INFO: Existing archive found; reading current remote refs.");
     let refs_before = list_remote_refs(destination).await?;
+    println!("INFO: Saving snapshots of previous refs.");
     snapshot_refs(destination).await?;
-    println!("INFO: Fetching remote refs without pruning.");
+    println!("INFO: Snapshots saved. Fetching remote refs without pruning.");
+    println!("INFO: Network guard: HTTP below 512 B/s for 180 s is aborted; default OpenSSH uses a 20 s connect timeout and keepalives.");
 
     let mut command = Command::new("git");
+    configure_git_network_limits(&mut command, Some(destination));
     command
-        .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
         .arg(destination)
         .args([

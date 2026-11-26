@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .priority import apply_memory_priority_to_handle, process_creation_flags
+from .i18n import tr
 from .repository import archive_path, parse_git_url
 
 
@@ -59,9 +60,9 @@ def _require_private_ipv4(address: str) -> str:
     try:
         parsed = ipaddress.ip_address(str(address).strip())
     except ValueError as error:
-        raise ValueError("Укажи корректный IPv4-адрес устройства.") from error
+        raise ValueError(tr("Укажи корректный IPv4-адрес устройства.")) from error
     if not _is_local_address(parsed):
-        raise ValueError("Разрешены только частные IPv4-адреса локальной сети, ZeroTier или CGNAT.")
+        raise ValueError(tr("Разрешены только частные IPv4-адреса локальной сети, ZeroTier или CGNAT."))
     return str(parsed)
 
 
@@ -103,7 +104,7 @@ def local_ipv4_interfaces() -> list[tuple[str, ipaddress.IPv4Network]]:
 def _send_json(connection: ssl.SSLSocket, value: dict[str, Any]) -> None:
     payload = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(payload) > MAX_HEADER_BYTES:
-        raise ValueError("Сетевой заголовок слишком большой.")
+        raise ValueError(tr("Сетевой заголовок слишком большой."))
     connection.sendall(payload)
 
 
@@ -112,15 +113,15 @@ def _read_json(connection: ssl.SSLSocket) -> dict[str, Any]:
     while len(payload) <= MAX_HEADER_BYTES:
         part = connection.recv(1)
         if not part:
-            raise ConnectionError("Соединение закрыто до получения заголовка.")
+            raise ConnectionError(tr("Соединение закрыто до получения заголовка."))
         if part == b"\n":
             break
         payload.extend(part)
     else:
-        raise ValueError("Сетевой заголовок превышает лимит.")
+        raise ValueError(tr("Сетевой заголовок превышает лимит."))
     value = json.loads(payload.decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("Некорректный сетевой заголовок.")
+        raise ValueError(tr("Некорректный сетевой заголовок."))
     return value
 
 
@@ -130,7 +131,7 @@ def _read_exact(connection: ssl.SSLSocket, length: int, destination) -> str:
     while remaining:
         chunk = connection.recv(min(1024 * 1024, remaining))
         if not chunk:
-            raise ConnectionError("Передача оборвалась до получения всего Git bundle.")
+            raise ConnectionError(tr("Передача оборвалась до получения всего Git bundle."))
         destination.write(chunk)
         digest.update(chunk)
         remaining -= len(chunk)
@@ -162,14 +163,14 @@ def _run_process(arguments: list[str], timeout: int = 3600) -> tuple[int, str, s
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate()
-        raise TimeoutError(f"Команда превысила лимит времени ({timeout} с): {' '.join(arguments[:3])}")
+        raise TimeoutError(tr(f"Команда превысила лимит времени ({timeout} с): {' '.join(arguments[:3])}"))
     return process.returncode, stdout, stderr
 
 
 def _require_process_success(arguments: list[str], timeout: int = 3600) -> tuple[str, str]:
     code, stdout, stderr = _run_process(arguments, timeout)
     if code != 0:
-        message = (stderr or stdout or f"Код завершения: {code}").strip()
+        message = (stderr or stdout or tr(f"Код завершения: {code}")).strip()
         raise RuntimeError(message[-6000:])
     return stdout, stderr
 
@@ -177,22 +178,22 @@ def _require_process_success(arguments: list[str], timeout: int = 3600) -> tuple
 def _certificate_identity(certificate: x509.Certificate) -> str:
     values = certificate.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
     if len(values) != 1:
-        raise ValueError("У сертификата пира нет уникального идентификатора.")
+        raise ValueError(tr("У сертификата пира нет уникального идентификатора."))
     try:
         return str(uuid.UUID(values[0].value))
     except ValueError as error:
-        raise ValueError("Сертификат содержит некорректный идентификатор пира.") from error
+        raise ValueError(tr("Сертификат содержит некорректный идентификатор пира.")) from error
 
 
 def _validate_identity_certificate(pem: str) -> tuple[x509.Certificate, str, str]:
     if not isinstance(pem, str) or len(pem.encode("utf-8")) > 16 * 1024:
-        raise ValueError("Сертификат пира имеет недопустимый размер.")
+        raise ValueError(tr("Сертификат пира имеет недопустимый размер."))
     certificate = x509.load_pem_x509_certificate(pem.encode("ascii"))
     if certificate.issuer != certificate.subject:
-        raise ValueError("Сертификат пира не является самоподписанным.")
+        raise ValueError(tr("Сертификат пира не является самоподписанным."))
     public_key = certificate.public_key()
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
-        raise ValueError("Не поддерживается тип ключа сертификата пира.")
+        raise ValueError(tr("Не поддерживается тип ключа сертификата пира."))
     public_key.verify(
         certificate.signature,
         certificate.tbs_certificate_bytes,
@@ -200,19 +201,19 @@ def _validate_identity_certificate(pem: str) -> tuple[x509.Certificate, str, str
     )
     constraints = certificate.extensions.get_extension_for_class(x509.BasicConstraints).value
     if not constraints.ca:
-        raise ValueError("Сертификат пира не может использоваться как закреплённый корень доверия.")
+        raise ValueError(tr("Сертификат пира не может использоваться как закреплённый корень доверия."))
     key_usage = certificate.extensions.get_extension_for_class(x509.KeyUsage).value
     if not key_usage.digital_signature or not key_usage.key_cert_sign:
-        raise ValueError("Сертификат пира не содержит нужные ограничения ключа.")
+        raise ValueError(tr("Сертификат пира не содержит нужные ограничения ключа."))
     extended_usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
     if not {ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH}.issubset(set(extended_usage)):
-        raise ValueError("Сертификат пира не разрешает клиентскую и серверную TLS-аутентификацию.")
+        raise ValueError(tr("Сертификат пира не разрешает клиентскую и серверную TLS-аутентификацию."))
     names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     if x509.DNSName("gitarchive-peer") not in names:
-        raise ValueError("Сертификат пира имеет неизвестное назначение.")
+        raise ValueError(tr("Сертификат пира имеет неизвестное назначение."))
     now = datetime.now(timezone.utc)
     if not certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc:
-        raise ValueError("Срок действия сертификата пира истёк или ещё не начался.")
+        raise ValueError(tr("Срок действия сертификата пира истёк или ещё не начался."))
     peer_id = _certificate_identity(certificate)
     der = certificate.public_bytes(serialization.Encoding.DER)
     return certificate, peer_id, hashlib.sha256(der).hexdigest()
@@ -223,7 +224,7 @@ def _make_identity(directory: Path) -> tuple[str, str, str]:
     key_path = directory / "identity-key.pem"
     cert_path = directory / "identity-cert.pem"
     if key_path.exists() != cert_path.exists():
-        raise RuntimeError("Файлы сетевой идентичности неполные. Не удаляй их: требуется восстановление пары ключ/сертификат.")
+        raise RuntimeError(tr("Файлы сетевой идентичности неполные. Не удаляй их: требуется восстановление пары ключ/сертификат."))
     if key_path.exists():
         key_pem = key_path.read_bytes()
         cert_pem = cert_path.read_text(encoding="ascii")
@@ -372,7 +373,7 @@ class _PeerRequestHandler(socketserver.BaseRequestHandler):
             elif operation == "bundle":
                 service._handle_bundle(connection, message, str(self.client_address[0]))
             else:
-                _send_json(connection, {"ok": False, "error": "Неизвестная операция."})
+                _send_json(connection, {"ok": False, "error": tr("Неизвестная операция.")})
         except (OSError, ssl.SSLError, ValueError, RuntimeError, json.JSONDecodeError, ConnectionError) as error:
             if connection is not None:
                 try:
@@ -432,10 +433,10 @@ class LanPeerService:
         if self.is_running:
             return self.local_addresses()
         if not 1024 <= int(port) <= 65535:
-            raise ValueError("Порт должен быть в диапазоне 1024–65535.")
+            raise ValueError(tr("Порт должен быть в диапазоне 1024–65535."))
         addresses = self.local_addresses()
         if not addresses:
-            raise RuntimeError("Не найдено частных IPv4-интерфейсов для приёма подключений.")
+            raise RuntimeError(tr("Не найдено частных IPv4-интерфейсов для приёма подключений."))
         self.port = int(port)
         errors = []
         for address in addresses:
@@ -454,7 +455,7 @@ class LanPeerService:
             self._servers.append(server)
             self._threads.append(thread)
         if not self._servers:
-            raise OSError("Не удалось открыть LAN-порт: " + "; ".join(errors[:3]))
+            raise OSError(tr("Не удалось открыть LAN-порт: ") + "; ".join(errors[:3]))
         return [str(server.server_address[0]) for server in self._servers]
 
     def stop(self) -> None:
@@ -472,7 +473,7 @@ class LanPeerService:
 
     def issue_pairing_code(self) -> str:
         if not self.is_running:
-            raise RuntimeError("Сначала включи приём подключений.")
+            raise RuntimeError(tr("Сначала включи приём подключений."))
         with self._lock:
             self.pairing_code = secrets.token_urlsafe(24)
             self.pairing_expires = time.monotonic() + 600
@@ -534,10 +535,10 @@ class LanPeerService:
         address = _require_private_ipv4(address)
         port = int(port)
         if not 1024 <= port <= 65535:
-            raise ValueError("Порт сопряжённого устройства вне допустимого диапазона.")
+            raise ValueError(tr("Порт сопряжённого устройства вне допустимого диапазона."))
         _certificate, parsed_id, fingerprint = _validate_identity_certificate(cert_pem)
         if parsed_id != str(uuid.UUID(peer_id)):
-            raise ValueError("Идентификатор не совпадает с сертификатом пира.")
+            raise ValueError(tr("Идентификатор не совпадает с сертификатом пира."))
         path = self._peer_file(peer_id)
         temporary = path.with_suffix(".pem.tmp")
         temporary.write_text(cert_pem, encoding="ascii")
@@ -586,25 +587,25 @@ class LanPeerService:
             code = self.pairing_code
             expires = self.pairing_expires
         if not code or time.monotonic() > expires:
-            raise PermissionError("Код сопряжения не создан или истёк. Создай новый код на принимающем устройстве.")
+            raise PermissionError(tr("Код сопряжения не создан или истёк. Создай новый код на принимающем устройстве."))
         peer_id = str(message.get("peer_id", ""))
         nonce = str(message.get("nonce", ""))
         cert_pem = str(message.get("certificate", ""))
         _certificate, parsed_id, client_fp = _validate_identity_certificate(cert_pem)
         if parsed_id != str(uuid.UUID(peer_id)):
-            raise ValueError("Идентификатор отправителя не совпадает с сертификатом.")
+            raise ValueError(tr("Идентификатор отправителя не совпадает с сертификатом."))
         if not re.fullmatch(r"[0-9a-f]{64}", nonce):
-            raise ValueError("Некорректный одноразовый challenge.")
+            raise ValueError(tr("Некорректный одноразовый challenge."))
         payload = f"GITARCHIVE-PAIR-V1\n{nonce}\n{peer_id}\n{client_fp}\n{self.fingerprint}".encode("ascii")
         expected = hmac.new(code.encode("ascii"), payload, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, str(message.get("proof", ""))):
-            raise PermissionError("Неверный код сопряжения.")
+            raise PermissionError(tr("Неверный код сопряжения."))
         remote_port = int(message.get("listen_port", DEFAULT_PORT))
         if not 1024 <= remote_port <= 65535:
-            raise ValueError("Порт удалённого устройства вне допустимого диапазона.")
+            raise ValueError(tr("Порт удалённого устройства вне допустимого диапазона."))
         with self._lock:
             if self.pairing_code != code or time.monotonic() > self.pairing_expires:
-                raise PermissionError("Код сопряжения уже использован или истёк. Создай новый код.")
+                raise PermissionError(tr("Код сопряжения уже использован или истёк. Создай новый код."))
             self.pairing_code = None
             self.pairing_expires = 0.0
         self._store_peer(peer_id, cert_pem, address, remote_port)
@@ -628,10 +629,10 @@ class LanPeerService:
         address = _require_private_ipv4(address)
         port = int(port)
         if not 1024 <= port <= 65535:
-            raise ValueError("Порт удалённого устройства вне допустимого диапазона.")
+            raise ValueError(tr("Порт удалённого устройства вне допустимого диапазона."))
         code = str(pairing_code).strip()
         if len(code) < 24 or len(code) > 128:
-            raise ValueError("Код должен быть полным одноразовым кодом сопряжения.")
+            raise ValueError(tr("Код должен быть полным одноразовым кодом сопряжения."))
         raw = socket.create_connection((address, int(port)), timeout=5)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -644,7 +645,7 @@ class LanPeerService:
             if expected_fingerprint and not hmac.compare_digest(
                 server_fp, str(expected_fingerprint).lower()
             ):
-                raise PermissionError("Отпечаток сертификата не совпадает с найденным устройством.")
+                raise PermissionError(tr("Отпечаток сертификата не совпадает с найденным устройством."))
             nonce = secrets.token_hex(32)
             client_certificate = x509.load_pem_x509_certificate(self.cert_pem.encode("ascii"))
             client_der = client_certificate.public_bytes(serialization.Encoding.DER)
@@ -661,43 +662,43 @@ class LanPeerService:
             })
             response = _read_json(connection)
             if response.get("ok") is not True:
-                raise PermissionError(str(response.get("error") or "Сопряжение отклонено."))
+                raise PermissionError(str(response.get("error") or tr("Сопряжение отклонено.")))
             remote_pem = str(response.get("certificate", ""))
             _certificate, remote_id, remote_fp = _validate_identity_certificate(remote_pem)
             if remote_fp != server_fp or remote_id != str(response.get("peer_id")):
-                raise PermissionError("Сертификат удалённого устройства изменился во время сопряжения.")
+                raise PermissionError(tr("Сертификат удалённого устройства изменился во время сопряжения."))
             ack_payload = f"GITARCHIVE-ACK-V1\n{nonce}\n{client_fp}\n{server_fp}\n{remote_id}".encode("ascii")
             expected = hmac.new(code.encode("ascii"), ack_payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(expected, str(response.get("proof", ""))):
-                raise PermissionError("Не удалось подтвердить владение кодом сопряжения.")
+                raise PermissionError(tr("Не удалось подтвердить владение кодом сопряжения."))
             return self._store_peer(remote_id, remote_pem, address, int(port))
 
     def _handle_bundle(self, connection: ssl.SSLSocket, message: dict[str, Any], address: str) -> None:
         address = _require_private_ipv4(address)
         client_der = connection.getpeercert(binary_form=True)
         if not client_der:
-            raise PermissionError("Для передачи требуется сопряжённое устройство.")
+            raise PermissionError(tr("Для передачи требуется сопряжённое устройство."))
         fingerprint = hashlib.sha256(client_der).hexdigest()
         peer = next((item for item in self.peers() if item["fingerprint"] == fingerprint), None)
         if not peer:
-            raise PermissionError("Сертификат отправителя отсутствует в списке доверенных устройств.")
+            raise PermissionError(tr("Сертификат отправителя отсутствует в списке доверенных устройств."))
         if not self.transfer_slots.acquire(blocking=False):
-            raise RuntimeError("На этом устройстве уже выполняются две передачи.")
+            raise RuntimeError(tr("На этом устройстве уже выполняются две передачи."))
         try:
             metadata = message.get("repository")
             if not isinstance(metadata, dict):
-                raise ValueError("Не переданы сведения о Git-репозитории.")
+                raise ValueError(tr("Не переданы сведения о Git-репозитории."))
             url, namespace, name, host, provider = parse_git_url(str(metadata.get("url", "")))
             if (str(metadata.get("namespace")) != namespace or
                     str(metadata.get("name")) != name or
                     str(metadata.get("host")) != host):
-                raise ValueError("Метаданные репозитория не совпадают с его Git URL.")
+                raise ValueError(tr("Метаданные репозитория не совпадают с его Git URL."))
             length = int(message.get("size", 0))
             digest = str(message.get("sha256", ""))
             if not 0 < length <= MAX_BUNDLE_BYTES or not re.fullmatch(r"[0-9a-f]{64}", digest):
-                raise ValueError("Размер или контрольная сумма bundle некорректны.")
+                raise ValueError(tr("Размер или контрольная сумма bundle некорректны."))
             if shutil.disk_usage(self.incoming_dir).free < length + 64 * 1024 * 1024:
-                raise OSError("Недостаточно свободного места для входящего архива (нужен дополнительный запас 64 МБ).")
+                raise OSError(tr("Недостаточно свободного места для входящего архива (нужен дополнительный запас 64 МБ)."))
             transfer_id = uuid.uuid4().hex
             bundle_path = self.incoming_dir / f"{transfer_id}.bundle"
             temporary = bundle_path.with_suffix(".bundle.part")
@@ -706,7 +707,7 @@ class LanPeerService:
                 with temporary.open("wb") as stream:
                     received_digest = _read_exact(connection, length, stream)
                 if not hmac.compare_digest(received_digest, digest):
-                    raise ValueError("Контрольная сумма Git bundle не совпала.")
+                    raise ValueError(tr("Контрольная сумма Git bundle не совпала."))
                 temporary.replace(bundle_path)
             except Exception:
                 temporary.unlink(missing_ok=True)
@@ -735,18 +736,18 @@ class LanPeerService:
     def send_bundle(self, peer_id: str, repository: dict[str, Any]) -> dict[str, Any]:
         peer = self.find_peer(peer_id)
         if not peer:
-            raise PermissionError("Устройство ещё не сопряжено.")
+            raise PermissionError(tr("Устройство ещё не сопряжено."))
         peer_address = _require_private_ipv4(str(peer.get("address", "")))
         if str(repository.get("storage_format", "folder")).lower() != "folder":
-            raise ValueError("Прямая передача ZIP/7z пока не включена. Сначала используй формат папки .git.")
+            raise ValueError(tr("Прямая передача ZIP/7z пока не включена. Сначала используй формат папки .git."))
         mirror = Path(str(repository.get("local_path", "")))
         if not (mirror.is_dir() and (mirror / "HEAD").is_file() and (mirror / "objects").is_dir()):
-            raise FileNotFoundError("Локальное bare-зеркало ещё не создано или недоступно.")
+            raise FileNotFoundError(tr("Локальное bare-зеркало ещё не создано или недоступно."))
         url, namespace, name, host, provider = parse_git_url(str(repository.get("url", "")))
         if (str(repository.get("namespace")) != namespace or
                 str(repository.get("name")) != name or
                 str(repository.get("host")) != host):
-            raise ValueError("Метаданные в локальном списке не совпадают с Git URL.")
+            raise ValueError(tr("Метаданные в локальном списке не совпадают с Git URL."))
         with tempfile.TemporaryDirectory(prefix="gitarchive-peer-") as temporary_dir:
             bundle_path = Path(temporary_dir) / f"{name}.bundle"
             _require_process_success([
@@ -754,7 +755,7 @@ class LanPeerService:
             ], timeout=7200)
             length = bundle_path.stat().st_size
             if not 0 < length <= MAX_BUNDLE_BYTES:
-                raise ValueError(f"Размер bundle превышает лимит {MAX_BUNDLE_BYTES // (1024**3)} ГБ.")
+                raise ValueError(tr(f"Размер bundle превышает лимит {MAX_BUNDLE_BYTES // (1024**3)} ГБ."))
             digest = hashlib.sha256()
             with bundle_path.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -778,13 +779,13 @@ class LanPeerService:
                 })
                 response = _read_json(connection)
                 if response.get("ok") is not True or response.get("ready") is not True:
-                    raise RuntimeError(str(response.get("error") or "Удалённое устройство не готово принять bundle."))
+                    raise RuntimeError(str(response.get("error") or tr("Удалённое устройство не готово принять bundle.")))
                 with bundle_path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         connection.sendall(chunk)
                 result = _read_json(connection)
                 if result.get("ok") is not True or result.get("received") is not True:
-                    raise RuntimeError(str(result.get("error") or "Удалённое устройство не подтвердило получение."))
+                    raise RuntimeError(str(result.get("error") or tr("Удалённое устройство не подтвердило получение.")))
                 return {"transfer_id": result.get("transfer_id"), "size": length, "repository": metadata}
 
     def list_incoming(self) -> list[dict[str, Any]]:
@@ -814,33 +815,33 @@ def import_incoming_bundle(
     bundle = Path(bundle_path).resolve()
     sidecar_path = bundle.with_suffix(".json")
     if not bundle.is_file() or not sidecar_path.is_file():
-        raise FileNotFoundError("Полученный bundle или его метаданные не найдены.")
+        raise FileNotFoundError(tr("Полученный bundle или его метаданные не найдены."))
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     expected_size = int(sidecar.get("size", 0))
     expected_digest = str(sidecar.get("sha256", ""))
     if not 0 < expected_size <= MAX_BUNDLE_BYTES or bundle.stat().st_size != expected_size:
-        raise ValueError("Размер входящего Git bundle не совпадает с метаданными.")
+        raise ValueError(tr("Размер входящего Git bundle не совпадает с метаданными."))
     digest = hashlib.sha256()
     with bundle.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     if not hmac.compare_digest(digest.hexdigest(), expected_digest):
-        raise ValueError("SHA-256 входящего Git bundle не совпадает с метаданными.")
+        raise ValueError(tr("SHA-256 входящего Git bundle не совпадает с метаданными."))
     metadata = sidecar.get("repository")
     if not isinstance(metadata, dict):
-        raise ValueError("Метаданные входящего репозитория некорректны.")
+        raise ValueError(tr("Метаданные входящего репозитория некорректны."))
     url, namespace, name, host, provider = parse_git_url(str(metadata.get("url", "")))
     if (str(metadata.get("namespace")) != namespace or
             str(metadata.get("name")) != name or
             str(metadata.get("host")) != host):
-        raise ValueError("Git URL и метаданные репозитория не совпадают.")
+        raise ValueError(tr("Git URL и метаданные репозитория не совпадают."))
     peer_id = str(uuid.UUID(str(sidecar.get("source_peer_id"))))
     peer_slug = peer_id.replace("-", "")
     timestamp = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     target = archive_path(Path(storage_root).expanduser(), host, namespace, name, "folder")
     target.parent.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(target.parent).free < expected_size + 64 * 1024 * 1024:
-        raise OSError("Недостаточно места для временного зеркала: оставь место ещё как минимум под размер bundle и запас 64 МБ.")
+        raise OSError(tr("Недостаточно места для временного зеркала: оставь место ещё как минимум под размер bundle и запас 64 МБ."))
 
     temporary_mirror = target.parent / f".{target.name}.incoming-{uuid.uuid4().hex}"
     try:
@@ -851,7 +852,7 @@ def import_incoming_bundle(
         ], timeout=7200)
         if target.exists():
             if not (target.is_dir() and (target / "HEAD").is_file() and (target / "objects").is_dir()):
-                raise FileExistsError("Путь архива уже занят, но это не bare Git-зеркало.")
+                raise FileExistsError(tr("Путь архива уже занят, но это не bare Git-зеркало."))
             refspec = f"+refs/*:refs/gitarchive/peers/{peer_slug}/{timestamp}/*"
             _require_process_success([
                 "git", "--git-dir", str(target), "fetch", "--no-tags", "--no-write-fetch-head",
@@ -859,14 +860,14 @@ def import_incoming_bundle(
             ], timeout=7200)
             shutil.rmtree(temporary_mirror, ignore_errors=True)
             local_path = target
-            status = "Получено по LAN · refs добавлены отдельно"
+            status = tr("Получено по LAN · refs добавлены отдельно")
         else:
             _require_process_success([
                 "git", "--git-dir", str(temporary_mirror), "config", "remote.origin.url", url
             ], timeout=30)
             os.replace(temporary_mirror, target)
             local_path = target
-            status = "Получено по LAN"
+            status = tr("Получено по LAN")
     except Exception:
         shutil.rmtree(temporary_mirror, ignore_errors=True)
         raise

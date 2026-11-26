@@ -1,6 +1,26 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
+
+rem The outer invocation captures every build step into a timestamped log
+rem beside this script, then prints the complete log to the console.
+if defined GITARCHIVE_BUILD_LOG goto :build_inner
+
+set "BUILD_STAMP="
+for /f %%I in ('powershell.exe -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm-ss" 2^>nul') do set "BUILD_STAMP=%%I"
+if not defined BUILD_STAMP set "BUILD_STAMP=build-%RANDOM%-%RANDOM%"
+set "GITARCHIVE_BUILD_LOG=%~dp0%BUILD_STAMP%.log"
+echo [LOG] Saving build output to "%BUILD_STAMP%.log"
+call "%~f0" %* >> "%GITARCHIVE_BUILD_LOG%" 2>&1
+set "BUILD_EXIT=%ERRORLEVEL%"
+echo.
+echo [LOG] Build output:
+type "%GITARCHIVE_BUILD_LOG%"
+echo.
+echo [LOG] Full log: "%GITARCHIVE_BUILD_LOG%"
+exit /b %BUILD_EXIT%
+
+:build_inner
 title GitArchive - Windows build
 
 where py >nul 2>nul

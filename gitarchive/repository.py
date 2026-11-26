@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from .i18n import tr
+
 
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_.~+-]+")
 _WINDOWS_RESERVED_NAMES = {
@@ -32,7 +34,7 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
     """
     value = value.strip()
     if not value:
-        raise ValueError("Вставь HTTPS- или SSH-ссылку на Git-репозиторий.")
+        raise ValueError(tr("Вставь HTTPS- или SSH-ссылку на Git-репозиторий."))
 
     scp = _SCP_URL.fullmatch(value) if "://" not in value else None
     if scp:
@@ -49,18 +51,18 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
             host = (parsed.hostname or "").lower()
             port = parsed.port
         except ValueError as error:
-            raise ValueError("Некорректный адрес Git-сервера.") from error
+            raise ValueError(tr("Некорректный адрес Git-сервера.")) from error
 
         if parsed.scheme not in {"https", "ssh"}:
-            raise ValueError("Поддерживаются только HTTPS и SSH. Обычный HTTP не используется.")
+            raise ValueError(tr("Поддерживаются только HTTPS и SSH. Обычный HTTP не используется."))
         if not host or not parsed.path:
-            raise ValueError("В ссылке должны быть адрес сервера и путь к репозиторию.")
+            raise ValueError(tr("В ссылке должны быть адрес сервера и путь к репозиторию."))
         if parsed.password is not None or (parsed.scheme == "https" and parsed.username is not None):
-            raise ValueError("Не вставляй пароль или токен прямо в URL. Используй Git Credential Manager или SSH-ключ.")
+            raise ValueError(tr("Не вставляй пароль или токен прямо в URL. Используй Git Credential Manager или SSH-ключ."))
         if parsed.scheme == "ssh" and parsed.username is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", parsed.username):
-            raise ValueError("В SSH-ссылке недопустимое имя пользователя.")
+            raise ValueError(tr("В SSH-ссылке недопустимое имя пользователя."))
         if parsed.query or parsed.fragment:
-            raise ValueError("Удали параметры после ? или # и вставь чистую ссылку на репозиторий.")
+            raise ValueError(tr("Удали параметры после ? или # и вставь чистую ссылку на репозиторий."))
 
         transport = parsed.scheme
         path = parsed.path
@@ -73,7 +75,7 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
 
     raw_parts = [unquote(part) for part in path.strip("/").split("/") if part]
     if not raw_parts:
-        raise ValueError("В ссылке не найден путь к репозиторию.")
+        raise ValueError(tr("В ссылке не найден путь к репозиторию."))
 
     # GitHub repository pages have many suffix routes, but the repository is
     # always identified by the first two path components.
@@ -96,16 +98,16 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
         parts = raw_parts[:route_index] if route_index is not None else raw_parts
 
     if len(parts) < 2:
-        raise ValueError("Не удалось распознать namespace/repository в ссылке.")
+        raise ValueError(tr("Не удалось распознать namespace/repository в ссылке."))
 
     parts[-1] = re.sub(r"\.git$", "", parts[-1], flags=re.IGNORECASE)
     if not all(_SAFE_COMPONENT.fullmatch(part or "") and part not in {".", ".."} for part in parts):
-        raise ValueError("В пути репозитория есть недопустимые символы.")
+        raise ValueError(tr("В пути репозитория есть недопустимые символы."))
 
     namespace = "/".join(parts[:-1])
     name = parts[-1]
     if not name:
-        raise ValueError("Не удалось определить имя репозитория.")
+        raise ValueError(tr("Не удалось определить имя репозитория."))
 
     if transport == "scp":
         normalized = f"{authority}:{namespace}/{name}.git"
@@ -123,7 +125,7 @@ def parse_git_url(value: str) -> tuple[str, str, str, str, str]:
     elif host == "git.sr.ht":
         provider = "SourceHut"
     else:
-        provider = "Свой Git-сервер"
+        provider = tr("Свой Git-сервер")
 
     host_key = host + (f":{port}" if port else "")
     return normalized, namespace, name, host_key, provider
@@ -149,13 +151,13 @@ def provider_name(host: str) -> str:
         return "Bitbucket"
     if hostname == "git.sr.ht":
         return "SourceHut"
-    return "Свой Git-сервер"
+    return tr("Свой Git-сервер")
 
 
 def safe_path_part(value: str) -> str:
     """Validate one user-controlled namespace or repository path component."""
     if not _SAFE_COMPONENT.fullmatch(value or "") or value in {".", ".."}:
-        raise ValueError("В пути репозитория есть недопустимые символы.")
+        raise ValueError(tr("В пути репозитория есть недопустимые символы."))
     return value
 
 
@@ -163,16 +165,16 @@ def storage_key(host: str) -> str:
     """Convert a host (including an optional port) into one safe folder name."""
     key = re.sub(r"[^A-Za-z0-9.-]+", "_", host.lower()).strip("._")
     if not key:
-        raise ValueError("Некорректное имя Git-сервера.")
+        raise ValueError(tr("Некорректное имя Git-сервера."))
     return key
 
 def parse_github_url(value: str) -> tuple[str, str, str]:
     """Backward-compatible GitHub-only parser for existing integrations."""
     url, namespace, name, host, _provider = parse_git_url(value)
     if host != "github.com":
-        raise ValueError("Нужна ссылка именно на github.com.")
+        raise ValueError(tr("Нужна ссылка именно на github.com."))
     if "/" in namespace:
-        raise ValueError("Для GitHub укажи owner/repository.")
+        raise ValueError(tr("Для GitHub укажи owner/repository."))
     return url, namespace, name
 
 
@@ -194,7 +196,7 @@ def archive_path(
     extensions = {"folder": ".git", "directory": ".git", "git": ".git", "zip": ".zip", "7z": ".7z"}
     extension = extensions.get(str(storage_format).lower())
     if extension is None:
-        raise ValueError("Неизвестный формат хранения. Используй folder, zip или 7z.")
+        raise ValueError(tr("Неизвестный формат хранения. Используй folder, zip или 7z."))
     components = [_safe_path_component(part) for part in namespace.split("/")]
     safe_name = _safe_path_component(name)
     if host == "github.com":
@@ -202,7 +204,7 @@ def archive_path(
 
     safe_host = re.sub(r"[^A-Za-z0-9.-]+", "_", host.lower()).strip("._")
     if not safe_host:
-        raise ValueError("Некорректное имя Git-сервера.")
+        raise ValueError(tr("Некорректное имя Git-сервера."))
     safe_host = _safe_path_component(safe_host)
     return storage_root / "_custom" / safe_host / Path(*components) / f"{safe_name}{extension}"
 
@@ -256,8 +258,8 @@ def folder_size(path: Path) -> int:
 def human_size(size: int) -> str:
     """Format a byte count for the UI."""
     value = float(max(size, 0))
-    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if value < 1024 or unit == "ТБ":
-            return f"{int(value)} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+    for unit in (tr("Б"), tr("КБ"), tr("МБ"), tr("ГБ"), tr("ТБ")):
+        if value < 1024 or unit == tr("ТБ"):
+            return f"{int(value)} {unit}" if unit == tr("Б") else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} ТБ"
+    return tr(f"{value:.1f} ТБ")

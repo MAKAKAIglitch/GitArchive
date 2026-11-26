@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from typing import Any
 from datetime import datetime
@@ -15,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from .repository import archive_path, find_7zip, folder_size, human_size, parse_git_url
+from .i18n import tr
 from .priority import (
     apply_memory_priority_to_handle,
     normalize_cpu_priority,
@@ -52,7 +54,7 @@ def parse_sync_progress(output: str) -> tuple[int, str] | None:
         return min(100, int(match.group(2))), match.group(1).strip()
     generic = list(_GENERIC_PROGRESS_PATTERN.finditer(output))
     if generic:
-        return min(100, int(generic[-1].group(1))), "Архивация / распаковка"
+        return min(100, int(generic[-1].group(1))), tr("Архивация / распаковка")
     return None
 
 
@@ -123,7 +125,7 @@ def set_windows_autostart(enabled: bool) -> None:
     """Register or remove the current app for the current Windows user only."""
     if sys.platform != "win32":
         if enabled:
-            raise OSError("Автозапуск Windows доступен только в Windows.")
+            raise OSError(tr("Автозапуск Windows доступен только в Windows."))
         return
     import winreg
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -149,15 +151,15 @@ def proxy_url(config: dict) -> str | None:
     schemes = {"HTTP": "http", "HTTPS": "https", "SOCKS4": "socks4a", "SOCKS5": "socks5h"}
     proxy_type = str(config.get("proxy_type", "SOCKS5")).upper()
     if proxy_type not in schemes:
-        raise ValueError("Неизвестный тип прокси.")
+        raise ValueError(tr("Неизвестный тип прокси."))
     host = str(config.get("proxy_host", "")).strip()
     if not host or any(char.isspace() or char in "/\\@?#" for char in host):
-        raise ValueError("Укажи корректный адрес прокси без логина и пароля.")
+        raise ValueError(tr("Укажи корректный адрес прокси без логина и пароля."))
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     port = int(config.get("proxy_port", 0))
     if not 1 <= port <= 65535:
-        raise ValueError("Порт прокси должен быть от 1 до 65535.")
+        raise ValueError(tr("Порт прокси должен быть от 1 до 65535."))
     return f"{schemes[proxy_type]}://{host}:{port}"
 
 
@@ -265,7 +267,7 @@ class GitCommand(QRunnable):
                 raise subprocess.TimeoutExpired(self.args, self.timeout, output=stdout, stderr=stderr)
 
             if len(stdout) > 1_500_000:
-                stdout = stdout[:1_500_000] + "\n\n[GitArchive] Вывод обрезан после 1,5 МБ. Полный коммит остаётся в локальном архиве."
+                stdout = stdout[:1_500_000] + tr("\n\n[GitArchive] Вывод обрезан после 1,5 МБ. Полный коммит остаётся в локальном архиве.")
             self.signals.completed.emit(process.returncode, stdout, stderr)
         except (OSError, subprocess.TimeoutExpired) as error:
             self.signals.completed.emit(-1, "", str(error))
@@ -292,12 +294,12 @@ class CommitHistoryDialog(QDialog):
         self.cleanup_path: Path | None = None
         self.commits: dict[str, dict[str, str]] = {}
         self.selected_sha: str | None = None
-        self.setWindowTitle(f"История коммитов — {repo_name}")
+        self.setWindowTitle(tr(f"История коммитов — {repo_name}"))
         self.resize(1050, 680)
         self.setMinimumSize(760, 480)
 
         layout = QVBoxLayout(self)
-        header = QLabel(f"История локального архива · {repo_name}")
+        header = QLabel(tr(f"История локального архива · {repo_name}"))
         header.setObjectName("Section")
         layout.addWidget(header)
         body = QHBoxLayout()
@@ -306,16 +308,16 @@ class CommitHistoryDialog(QDialog):
         self.commit_list.currentItemChanged.connect(self.show_commit)
         self.details = QTextEdit()
         self.details.setReadOnly(True)
-        self.details.setPlaceholderText("Выбери коммит, чтобы посмотреть его описание и изменённые файлы.")
+        self.details.setPlaceholderText(tr("Выбери коммит, чтобы посмотреть его описание и изменённые файлы."))
         body.addWidget(self.commit_list, 1)
         body.addWidget(self.details, 2)
         layout.addLayout(body, 1)
         actions = QHBoxLayout()
-        self.download = QPushButton("Скачать выбранный коммит (.zip)")
+        self.download = QPushButton(tr("Скачать выбранный коммит (.zip)"))
         self.download.setObjectName("Accent")
         self.download.setEnabled(False)
         self.download.clicked.connect(self.export_commit)
-        close = QPushButton("Закрыть")
+        close = QPushButton(tr("Закрыть"))
         close.setObjectName("Secondary")
         close.clicked.connect(self.accept)
         actions.addWidget(self.download)
@@ -358,7 +360,7 @@ class CommitHistoryDialog(QDialog):
 
     def load_history(self) -> None:
         self.commit_list.clear()
-        self.commit_list.addItem("Загрузка истории…")
+        self.commit_list.addItem(tr("Загрузка истории…"))
         self.run_git([
             "git", "--git-dir", str(self.archive),
             "log", "-n", "250", "--date=iso-strict",
@@ -369,7 +371,7 @@ class CommitHistoryDialog(QDialog):
     def history_loaded(self, code: int, stdout: str, stderr: str) -> None:
         self.commit_list.clear()
         if code != 0:
-            self.details.setPlainText(stderr or "Не удалось прочитать историю Git.")
+            self.details.setPlainText(stderr or tr("Не удалось прочитать историю Git."))
             return
         for line in stdout.splitlines():
             parts = line.split("\x1f", 4)
@@ -385,7 +387,7 @@ class CommitHistoryDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, sha)
             self.commit_list.addItem(item)
         if not self.commits:
-            self.details.setPlainText("В архиве пока нет коммитов.")
+            self.details.setPlainText(tr("В архиве пока нет коммитов."))
         elif self.commit_list.count():
             self.commit_list.setCurrentRow(0)
 
@@ -397,7 +399,7 @@ class CommitHistoryDialog(QDialog):
             return
         self.selected_sha = str(sha)
         self.download.setEnabled(True)
-        self.details.setPlainText("Загрузка сведений о коммите…")
+        self.details.setPlainText(tr("Загрузка сведений о коммите…"))
         requested_sha = self.selected_sha
         self.run_git([
             "git", "--git-dir", str(self.archive),
@@ -408,21 +410,21 @@ class CommitHistoryDialog(QDialog):
     def commit_loaded(self, requested_sha: str, code: int, stdout: str, stderr: str) -> None:
         if requested_sha != self.selected_sha:
             return
-        self.details.setPlainText(stdout if code == 0 else (stderr or "Не удалось прочитать коммит."))
+        self.details.setPlainText(stdout if code == 0 else (stderr or tr("Не удалось прочитать коммит.")))
 
     def export_commit(self) -> None:
         sha = self.selected_sha
         if not sha or not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha):
             return
         destination, _ = QFileDialog.getSaveFileName(
-            self, "Скачать коммит", f"{self.repo_name}-{sha[:12]}.zip", "ZIP-архив (*.zip)"
+            self, tr("Скачать коммит"), f"{self.repo_name}-{sha[:12]}.zip", tr("ZIP-архив (*.zip)")
         )
         if not destination:
             return
         if not destination.lower().endswith(".zip"):
             destination += ".zip"
         self.download.setEnabled(False)
-        self.details.append("\n\nСоздание ZIP-архива…")
+        self.details.append(tr("\n\nСоздание ZIP-архива…"))
         self.run_git([
             "git", "--git-dir", str(self.archive),
             "archive", "--format=zip", f"--output={destination}", sha,
@@ -431,10 +433,10 @@ class CommitHistoryDialog(QDialog):
     def export_finished(self, destination: str, code: int, stdout: str, stderr: str) -> None:
         self.download.setEnabled(bool(self.selected_sha))
         if code == 0 and Path(destination).is_file():
-            self.details.append(f"\nГотово: {destination}")
-            QMessageBox.information(self, "Коммит сохранён", f"Архив коммита создан:\n{destination}")
+            self.details.append(tr(f"\nГотово: {destination}"))
+            QMessageBox.information(self, tr("Коммит сохранён"), tr(f"Архив коммита создан:\n{destination}"))
         else:
-            self.details.append(f"\nОшибка экспорта: {stderr or stdout}")
+            self.details.append(tr(f"\nОшибка экспорта: {stderr or stdout}"))
 
 
 class LanTaskSignals(QObject):
@@ -472,24 +474,23 @@ class LanPeerDialog(QDialog):
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Обмен архивами между устройствами в одной локальной сети или виртуальной сети. "
-            "ZeroTier используется как обычный сетевой адаптер — отдельная интеграция не нужна."
+            tr("Обмен архивами между устройствами в одной локальной сети или виртуальной сети. " + "ZeroTier используется как обычный сетевой адаптер — отдельная интеграция не нужна.")
         )
         intro.setWordWrap(True)
         intro.setObjectName("Muted")
         layout.addWidget(intro)
 
         listener_row = QHBoxLayout()
-        self.listen = QCheckBox("Принимать подключения")
+        self.listen = QCheckBox(tr("Принимать подключения"))
         self.listen.setChecked(self.service.is_running)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(self.service.port if self.service.is_running else DEFAULT_PORT)
         self.port.setFixedWidth(110)
-        self.listener_status = QLabel("Приём включён" if self.service.is_running else "Приём выключен")
+        self.listener_status = QLabel(tr("Приём включён") if self.service.is_running else tr("Приём выключен"))
         self.listener_status.setObjectName("Muted")
         listener_row.addWidget(self.listen)
-        listener_row.addWidget(QLabel("Порт"))
+        listener_row.addWidget(QLabel(tr("Порт")))
         listener_row.addWidget(self.port)
         listener_row.addStretch(1)
         listener_row.addWidget(self.listener_status)
@@ -504,11 +505,11 @@ class LanPeerDialog(QDialog):
         code_row = QHBoxLayout()
         self.local_code = QLineEdit()
         self.local_code.setReadOnly(True)
-        self.local_code.setPlaceholderText("Одноразовый код появится здесь")
-        make_code = QPushButton("Создать код")
+        self.local_code.setPlaceholderText(tr("Одноразовый код появится здесь"))
+        make_code = QPushButton(tr("Создать код"))
         make_code.setObjectName("Secondary")
         make_code.clicked.connect(self.make_pairing_code)
-        copy_code = QPushButton("Копировать")
+        copy_code = QPushButton(tr("Копировать"))
         copy_code.setObjectName("Secondary")
         copy_code.clicked.connect(lambda: QApplication.clipboard().setText(self.local_code.text()))
         code_row.addWidget(self.local_code, 1)
@@ -517,7 +518,7 @@ class LanPeerDialog(QDialog):
         layout.addLayout(code_row)
 
         discovery_row = QHBoxLayout()
-        discover = QPushButton("Найти устройства в локальных сетях")
+        discover = QPushButton(tr("Найти устройства в локальных сетях"))
         discover.setObjectName("Accent")
         discover.clicked.connect(self.discover)
         discovery_row.addWidget(discover)
@@ -531,32 +532,32 @@ class LanPeerDialog(QDialog):
 
         pair_form = QFormLayout()
         self.remote_address = QLineEdit()
-        self.remote_address.setPlaceholderText("IP найденного устройства, например 192.168.1.20 или 10.x.x.x")
+        self.remote_address.setPlaceholderText(tr("IP найденного устройства, например 192.168.1.20 или 10.x.x.x"))
         self.remote_port = QSpinBox()
         self.remote_port.setRange(1024, 65535)
         self.remote_port.setValue(DEFAULT_PORT)
         self.remote_code = QLineEdit()
         self.remote_code.setEchoMode(QLineEdit.EchoMode.Password)
-        self.remote_code.setPlaceholderText("Одноразовый код с принимающего устройства")
-        pair_form.addRow("Адрес устройства", self.remote_address)
-        pair_form.addRow("Порт", self.remote_port)
-        pair_form.addRow("Код сопряжения", self.remote_code)
+        self.remote_code.setPlaceholderText(tr("Одноразовый код с принимающего устройства"))
+        pair_form.addRow(tr("Адрес устройства"), self.remote_address)
+        pair_form.addRow(tr("Порт"), self.remote_port)
+        pair_form.addRow(tr("Код сопряжения"), self.remote_code)
         layout.addLayout(pair_form)
         pair_row = QHBoxLayout()
-        pair_button = QPushButton("Сопрячь устройство")
+        pair_button = QPushButton(tr("Сопрячь устройство"))
         pair_button.setObjectName("Accent")
         pair_button.clicked.connect(self.pair)
         pair_row.addWidget(pair_button)
         pair_row.addStretch(1)
         layout.addLayout(pair_row)
 
-        layout.addWidget(QLabel("Сопряжённые устройства"))
+        layout.addWidget(QLabel(tr("Сопряжённые устройства")))
         self.paired = QListWidget()
         self.paired.setMaximumHeight(105)
         self.paired.currentItemChanged.connect(self.update_send_state)
         layout.addWidget(self.paired)
         revoke_row = QHBoxLayout()
-        self.revoke_button = QPushButton("Удалить доверие к выбранному устройству")
+        self.revoke_button = QPushButton(tr("Удалить доверие к выбранному устройству"))
         self.revoke_button.setObjectName("Secondary")
         self.revoke_button.clicked.connect(self.forget_selected_peer)
         revoke_row.addWidget(self.revoke_button)
@@ -566,29 +567,28 @@ class LanPeerDialog(QDialog):
         send_row = QHBoxLayout()
         self.repository = QComboBox()
         self.repository.setMinimumWidth(260)
-        self.send_button = QPushButton("Передать выбранный архив")
+        self.send_button = QPushButton(tr("Передать выбранный архив"))
         self.send_button.setObjectName("Accent")
         self.send_button.clicked.connect(self.send_selected)
         send_row.addWidget(self.repository, 1)
         send_row.addWidget(self.send_button)
         layout.addLayout(send_row)
         format_note = QLabel(
-            "В первой версии передача поддерживает папки .git. ZIP/7z можно будет подключить "
-            "после отдельного этапа распаковки и упаковки; исходные сжатые архивы не изменяются."
+            tr("В первой версии передача поддерживает папки .git. ZIP/7z можно будет подключить " + "после отдельного этапа распаковки и упаковки; исходные сжатые архивы не изменяются.")
         )
         format_note.setWordWrap(True)
         format_note.setObjectName("Muted")
         layout.addWidget(format_note)
 
-        layout.addWidget(QLabel("Полученные архивы — сначала проверяются, затем импортируются вручную"))
+        layout.addWidget(QLabel(tr("Полученные архивы — сначала проверяются, затем импортируются вручную")))
         self.incoming = QListWidget()
         self.incoming.setMaximumHeight(125)
         layout.addWidget(self.incoming)
         import_row = QHBoxLayout()
-        import_button = QPushButton("Проверить и импортировать")
+        import_button = QPushButton(tr("Проверить и импортировать"))
         import_button.setObjectName("Accent")
         import_button.clicked.connect(self.import_selected)
-        refresh_button = QPushButton("Обновить")
+        refresh_button = QPushButton(tr("Обновить"))
         refresh_button.setObjectName("Secondary")
         refresh_button.clicked.connect(self.refresh_lists)
         import_row.addWidget(import_button)
@@ -596,14 +596,14 @@ class LanPeerDialog(QDialog):
         import_row.addStretch(1)
         layout.addLayout(import_row)
 
-        self.status = QLabel("Обнаружение работает только по нажатию кнопки.")
+        self.status = QLabel(tr("Обнаружение работает только по нажатию кнопки."))
         self.status.setWordWrap(True)
         self.status.setObjectName("Muted")
         layout.addWidget(self.status)
 
         close_row = QHBoxLayout()
         close_row.addStretch(1)
-        close_button = QPushButton("Закрыть")
+        close_button = QPushButton(tr("Закрыть"))
         close_button.setObjectName("Secondary")
         close_button.clicked.connect(self.accept)
         close_row.addWidget(close_button)
@@ -617,8 +617,8 @@ class LanPeerDialog(QDialog):
 
     def _listener_address_text(self) -> str:
         if not self.service.is_running:
-            return "Приём выключен. Включи его только на тех устройствах, которые должны получать архивы."
-        return "Адреса приёма: " + ", ".join(
+            return tr("Приём выключен. Включи его только на тех устройствах, которые должны получать архивы.")
+        return tr("Адреса приёма: ") + ", ".join(
             f"{address}:{self.service.port}" for address in self.service.local_addresses()
         )
 
@@ -626,35 +626,35 @@ class LanPeerDialog(QDialog):
         try:
             if enabled:
                 addresses = self.service.start(self.port.value())
-                self.listener_status.setText("Приём включён")
+                self.listener_status.setText(tr("Приём включён"))
                 self.port.setEnabled(False)
-                self.status.setText("GitArchive слушает только частные IPv4-адреса сетевых интерфейсов.")
-                self.local_addresses.setText("Адреса приёма: " + ", ".join(
+                self.status.setText(tr("GitArchive слушает только частные IPv4-адреса сетевых интерфейсов."))
+                self.local_addresses.setText(tr("Адреса приёма: ") + ", ".join(
                     f"{address}:{self.service.port}" for address in addresses
                 ))
             else:
                 self.service.stop()
                 self.local_code.clear()
-                self.listener_status.setText("Приём выключен")
+                self.listener_status.setText(tr("Приём выключен"))
                 self.port.setEnabled(True)
                 self.local_addresses.setText(self._listener_address_text())
-                self.status.setText("Приём подключений остановлен.")
+                self.status.setText(tr("Приём подключений остановлен."))
         except Exception as error:
             self.listen.blockSignals(True)
             self.listen.setChecked(False)
             self.listen.blockSignals(False)
             self.port.setEnabled(True)
-            QMessageBox.warning(self, "LAN-приём не запущен", str(error))
+            QMessageBox.warning(self, tr("LAN-приём не запущен"), str(error))
 
     def make_pairing_code(self) -> None:
         try:
             code = self.service.issue_pairing_code()
         except Exception as error:
-            QMessageBox.warning(self, "Не удалось создать код", str(error))
+            QMessageBox.warning(self, tr("Не удалось создать код"), str(error))
             return
         self.local_code.setText(code)
         QApplication.clipboard().setText(code)
-        self.status.setText("Код скопирован. Он действует 10 минут и используется один раз.")
+        self.status.setText(tr("Код скопирован. Он действует 10 минут и используется один раз."))
 
     def start_task(self, callback, done, *args) -> None:
         task = LanTask(callback, *args)
@@ -673,12 +673,12 @@ class LanPeerDialog(QDialog):
     def _task_failed(self, task: LanTask, message: str) -> None:
         self.tasks.discard(task)
         self.task_callbacks.pop(task, None)
-        self.status.setText("Ошибка: " + message)
+        self.status.setText(tr("Ошибка: ") + message)
         QMessageBox.warning(self, "LAN / ZeroTier", message)
 
     def discover(self) -> None:
         self.discovered.clear()
-        self.status.setText("Идёт поиск по подключённым частным IPv4-подсетям…")
+        self.status.setText(tr("Идёт поиск по подключённым частным IPv4-подсетям…"))
         self.start_task(discover_local_peers, self.discovery_finished, self.remote_port.value())
 
     def discovery_finished(self, peers: list[dict[str, str]]) -> None:
@@ -694,7 +694,7 @@ class LanPeerDialog(QDialog):
             self.discovered.addItem(item)
         self.refresh_lists()
         self.status.setText(
-            f"Найдено устройств: {len(peers)}. Репозитории и их названия при поиске не передаются."
+            tr(f"Найдено устройств: {len(peers)}. Репозитории и их названия при поиске не передаются.")
         )
 
     def select_discovered(self, item: QListWidgetItem) -> None:
@@ -707,11 +707,11 @@ class LanPeerDialog(QDialog):
         address = self.remote_address.text().strip()
         code = self.remote_code.text().strip()
         if not address or not code:
-            QMessageBox.information(self, "Сопряжение", "Укажи IP-адрес и одноразовый код с принимающего устройства.")
+            QMessageBox.information(self, tr("Сопряжение"), tr("Укажи IP-адрес и одноразовый код с принимающего устройства."))
             return
         port = self.remote_port.value()
         expected = self.expected_fingerprint
-        self.status.setText("Проверяется сертификат и выполняется сопряжение…")
+        self.status.setText(tr("Проверяется сертификат и выполняется сопряжение…"))
         self.start_task(
             self.service.pair_with_peer,
             self.pair_finished,
@@ -721,7 +721,7 @@ class LanPeerDialog(QDialog):
     def pair_finished(self, peer: dict[str, Any]) -> None:
         self.remote_code.clear()
         self.status.setText(
-            f"Устройство {peer['peer_id']} сопряжено. SHA-256: {peer['fingerprint']}"
+            tr(f"Устройство {peer['peer_id']} сопряжено. SHA-256: {peer['fingerprint']}")
         )
         self.refresh_lists()
 
@@ -730,7 +730,7 @@ class LanPeerDialog(QDialog):
         selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
         self.paired.clear()
         for peer in self.service.peers():
-            endpoint = f"{peer['address']}:{peer['port']}" if peer.get("address") else "адрес не сохранён"
+            endpoint = f"{peer['address']}:{peer['port']}" if peer.get("address") else tr("адрес не сохранён")
             item = QListWidgetItem(
                 f"{peer['peer_id'][:8]}  ·  {endpoint}  ·  {peer['fingerprint'][:16]}…"
             )
@@ -752,9 +752,8 @@ class LanPeerDialog(QDialog):
         peer_id = str(item.data(Qt.ItemDataRole.UserRole))
         answer = QMessageBox.question(
             self,
-            "Удалить доверенное устройство",
-            "GitArchive перестанет принимать передачи с этого устройства и отправлять ему архивы. "
-            "Локальные репозитории не удаляются. Для повторного обмена потребуется новое сопряжение.",
+            tr("Удалить доверенное устройство"),
+            tr("GitArchive перестанет принимать передачи с этого устройства и отправлять ему архивы. " + "Локальные репозитории не удаляются. Для повторного обмена потребуется новое сопряжение."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -762,7 +761,7 @@ class LanPeerDialog(QDialog):
             return
         self.service.forget_peer(peer_id)
         self.refresh_lists()
-        self.status.setText("Доверие к устройству отозвано.")
+        self.status.setText(tr("Доверие к устройству отозвано."))
 
     def update_send_state(self, *_args) -> None:
         has_peer = self.paired.currentItem() is not None
@@ -777,13 +776,15 @@ class LanPeerDialog(QDialog):
         repo = next((entry for entry in self.window.config["repositories"] if entry.get("id") == repo_id), None)
         if not peer_id or not repo:
             return
-        self.status.setText(f"Создаётся Git bundle и отправляется {repository_label(repo)}…")
+        self.status.setText(tr(f"Создаётся Git bundle и отправляется {repository_label(repo)}…"))
         self.start_task(self.service.send_bundle, self.send_finished, peer_id, dict(repo))
 
     def send_finished(self, result: dict[str, Any]) -> None:
         self.status.setText(
-            f"Передача завершена: {result['repository']['namespace']}/{result['repository']['name']} "
-            f"({human_size(int(result['size']))})."
+            tr(
+                f"Передача завершена: {result['repository']['namespace']}/{result['repository']['name']} "
+                f"({human_size(int(result['size']))})."
+            )
         )
 
     def refresh_incoming(self) -> None:
@@ -792,7 +793,7 @@ class LanPeerDialog(QDialog):
         self.incoming.clear()
         for item in self.service.list_incoming():
             repo = item.get("repository") or {}
-            text = (
+            text = tr(
                 f"{repo.get('namespace', '')}/{repo.get('name', 'неизвестный репозиторий')}  ·  "
                 f"{human_size(int(item.get('size', 0)))}  ·  {item.get('received_at', '')}"
             )
@@ -805,10 +806,10 @@ class LanPeerDialog(QDialog):
     def import_selected(self) -> None:
         item = self.incoming.currentItem()
         if not item:
-            QMessageBox.information(self, "Входящие архивы", "Выбери полученный bundle.")
+            QMessageBox.information(self, tr("Входящие архивы"), tr("Выбери полученный bundle."))
             return
         path = str(item.data(Qt.ItemDataRole.UserRole))
-        self.status.setText("Проверяется Git bundle и целостность объектов…")
+        self.status.setText(tr("Проверяется Git bundle и целостность объектов…"))
         existing = [dict(repo) for repo in self.window.config.get("repositories", [])]
         self.start_task(
             import_incoming_bundle,
@@ -833,9 +834,9 @@ class LanPeerDialog(QDialog):
         save_config(self.window.config)
         self.window.refresh()
         self.window.scan_sizes()
-        self.window.log(f"Импортировано из LAN: {repository_label(entry)}")
+        self.window.log(tr(f"Импортировано из LAN: {repository_label(entry)}"))
         self.refresh_lists()
-        self.status.setText(f"Импортировано: {repository_label(entry)}. Локальные ветки не перезаписывались.")
+        self.status.setText(tr(f"Импортировано: {repository_label(entry)}. Локальные ветки не перезаписывались."))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -962,6 +963,9 @@ class GitArchiveWindow(QMainWindow):
         self.theme_timer = QTimer(self)
         self.theme_timer.timeout.connect(self.check_theme)
         self.theme_timer.start(5000)
+        self.sync_watchdog_timer = QTimer(self)
+        self.sync_watchdog_timer.timeout.connect(self.check_sync_watchdog)
+        self.sync_watchdog_timer.start(30000)
         QTimer.singleShot(1000, self.sync_all)
 
     @property
@@ -1001,7 +1005,7 @@ class GitArchiveWindow(QMainWindow):
         side.addWidget(logo_row)
         side.addSpacing(26)
         self.nav = []
-        for index, title in enumerate(("Обзор", "Репозитории", "Журнал", "Настройки")):
+        for index, title in enumerate((tr("Обзор"), tr("Репозитории"), tr("Журнал"), tr("Настройки"))):
             button = QPushButton(title)
             button.setObjectName("Nav")
             button.setCheckable(True)
@@ -1016,9 +1020,9 @@ class GitArchiveWindow(QMainWindow):
         sync_layout = QVBoxLayout(sync_card)
         sync_layout.setContentsMargins(10, 10, 10, 10)
         sync_layout.setSpacing(7)
-        sync_title = QLabel("СИНХРОНИЗАЦИЯ")
+        sync_title = QLabel(tr("СИНХРОНИЗАЦИЯ"))
         sync_title.setObjectName("Muted")
-        self.sidebar_sync_label = QLabel("Ожидание синхронизации")
+        self.sidebar_sync_label = QLabel(tr("Ожидание синхронизации"))
         self.sidebar_sync_label.setWordWrap(True)
         self.sidebar_sync_label.setStyleSheet("font-weight:600;")
         self.sidebar_sync_bar = QProgressBar()
@@ -1026,7 +1030,7 @@ class GitArchiveWindow(QMainWindow):
         self.sidebar_sync_bar.setValue(0)
         self.sidebar_sync_bar.setTextVisible(False)
         self.sidebar_sync_bar.setFixedHeight(6)
-        self.sidebar_sync_detail = QLabel("Добавь репозиторий")
+        self.sidebar_sync_detail = QLabel(tr("Добавь репозиторий"))
         self.sidebar_sync_detail.setObjectName("Muted")
         self.sidebar_sync_detail.setWordWrap(True)
         sync_layout.addWidget(sync_title)
@@ -1045,12 +1049,12 @@ class GitArchiveWindow(QMainWindow):
         body.setContentsMargins(28, 24, 28, 20)
         body.setSpacing(16)
         top = QHBoxLayout()
-        self.heading = QLabel("Обзор")
+        self.heading = QLabel(tr("Обзор"))
         self.heading.setObjectName("Heading")
         self.heading.setFont(QFont("Segoe UI Variable", 25, QFont.Weight.DemiBold))
         top.addWidget(self.heading)
         top.addStretch(1)
-        sync = QPushButton("⟳  Синхронизировать")
+        sync = QPushButton(tr("⟳  Синхронизировать"))
         sync.setObjectName("Accent")
         sync.clicked.connect(self.sync_all)
         top.addWidget(sync)
@@ -1068,10 +1072,10 @@ class GitArchiveWindow(QMainWindow):
         cards.setSpacing(12)
         self.stats = {}
         for col, (key, title, initial, note) in enumerate((
-            ("repos", "Репозитории", "0", "В списке"),
-            ("mirrors", "Локальные копии", "0", "Git mirror"),
-            ("size", "Занято", "0 Б", "Все архивы"),
-            ("running", "Синхронизация", "0", "Активных задач"),
+            ("repos", tr("Репозитории"), "0", tr("В списке")),
+            ("mirrors", tr("Локальные копии"), "0", "Git mirror"),
+            ("size", tr("Занято"), tr("0 Б"), tr("Все архивы")),
+            ("running", tr("Синхронизация"), "0", tr("Активных задач")),
         )):
             card = QFrame()
             card.setObjectName("Card")
@@ -1090,11 +1094,11 @@ class GitArchiveWindow(QMainWindow):
             self.stats[key] = value
         d.addLayout(cards)
         bar = QHBoxLayout()
-        label = QLabel("Ваши проекты")
+        label = QLabel(tr("Ваши проекты"))
         label.setObjectName("Section")
         bar.addWidget(label)
         bar.addStretch(1)
-        add = QPushButton("＋  Добавить репозиторий")
+        add = QPushButton(tr("＋  Добавить репозиторий"))
         add.setObjectName("Secondary")
         add.clicked.connect(self.add_repository)
         bar.addWidget(add)
@@ -1112,10 +1116,10 @@ class GitArchiveWindow(QMainWindow):
         r.setContentsMargins(0, 0, 0, 0)
         bar = QHBoxLayout()
         for text, name, callback in (
-            ("＋  Добавить", "Accent", self.add_repository),
-            ("⟳  Обновить выбранный", "Secondary", self.sync_selected),
-            ("Открыть архив", "Secondary", self.open_selected_folder),
-            ("Восстановить копию", "Secondary", self.restore_selected),
+            (tr("＋  Добавить"), "Accent", self.add_repository),
+            (tr("⟳  Обновить выбранный"), "Secondary", self.sync_selected),
+            (tr("Открыть архив"), "Secondary", self.open_selected_folder),
+            (tr("Восстановить копию"), "Secondary", self.restore_selected),
         ):
             button = QPushButton(text)
             button.setObjectName(name)
@@ -1137,7 +1141,7 @@ class GitArchiveWindow(QMainWindow):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("Log")
-        self.log_view.setPlaceholderText("События синхронизации появятся здесь.")
+        self.log_view.setPlaceholderText(tr("События синхронизации появятся здесь."))
         self.log_view.setPlainText("\n".join(self.logs))
         self.log_view.document().setMaximumBlockCount(1200)
         self.log_view.moveCursor(QTextCursor.MoveOperation.End)
@@ -1160,31 +1164,31 @@ class GitArchiveWindow(QMainWindow):
         form.setVerticalSpacing(15)
         path_row = QHBoxLayout()
         self.storage_edit = QLineEdit(self.config["storage_path"])
-        browse = QPushButton("Обзор…")
+        browse = QPushButton(tr("Обзор…"))
         browse.setObjectName("Secondary")
         browse.clicked.connect(self.choose_storage)
         path_row.addWidget(self.storage_edit, 1)
         path_row.addWidget(browse)
         path_widget = QWidget()
         path_widget.setLayout(path_row)
-        form.addRow("Папка новых архивов", path_widget)
+        form.addRow(tr("Папка новых архивов"), path_widget)
         self.limit = QSpinBox()
         self.limit.setRange(1, 100000)
-        self.limit.setSuffix(" ГБ")
+        self.limit.setSuffix(tr(" ГБ"))
         self.limit.setValue(int(self.config["max_storage_gb"]))
-        form.addRow("Общий лимит", self.limit)
+        form.addRow(tr("Общий лимит"), self.limit)
         self.interval = QSpinBox()
         self.interval.setRange(1, 1440)
-        self.interval.setSuffix(" мин")
+        self.interval.setSuffix(tr(" мин"))
         self.interval.setValue(int(self.config["sync_interval_minutes"]))
-        form.addRow("Интервал синхронизации", self.interval)
+        form.addRow(tr("Интервал синхронизации"), self.interval)
         self.parallel = QSpinBox()
         self.parallel.setRange(1, 8)
         self.parallel.setValue(int(self.config["max_parallel"]))
-        form.addRow("Параллельные задачи", self.parallel)
+        form.addRow(tr("Параллельные задачи"), self.parallel)
 
         self.storage_format = QComboBox()
-        self.storage_format.addItem("Папка .git — без сжатия", "folder")
+        self.storage_format.addItem(tr("Папка .git — без сжатия"), "folder")
         self.storage_format.addItem("ZIP (.zip)", "zip")
         self.storage_format.addItem("7z (.7z)", "7z")
         if not self.seven_zip_path:
@@ -1193,20 +1197,20 @@ class GitArchiveWindow(QMainWindow):
                 item = model.item(index) if hasattr(model, "item") else None
                 if item:
                     item.setEnabled(False)
-            self.storage_format.setToolTip("Для ZIP и 7z нужен установленный 7-Zip с командной строкой. Перезапусти GitArchive после установки.")
+            self.storage_format.setToolTip(tr("Для ZIP и 7z нужен установленный 7-Zip с командной строкой. Перезапусти GitArchive после установки."))
         saved_format = str(self.config.get("new_storage_format", "folder")).lower()
         if saved_format not in {"folder", "zip", "7z"} or (saved_format != "folder" and not self.seven_zip_path):
             saved_format = "folder"
         self.storage_format.setCurrentIndex(max(0, self.storage_format.findData(saved_format)))
-        form.addRow("Формат новых архивов", self.storage_format)
+        form.addRow(tr("Формат новых архивов"), self.storage_format)
 
         self.compression_level = QComboBox()
-        self.compression_level.addItem("Минимум — быстрее", "min")
-        self.compression_level.addItem("Среднее", "medium")
-        self.compression_level.addItem("Максимум — медленнее", "max")
+        self.compression_level.addItem(tr("Минимум — быстрее"), "min")
+        self.compression_level.addItem(tr("Среднее"), "medium")
+        self.compression_level.addItem(tr("Максимум — медленнее"), "max")
         saved_level = str(self.config.get("compression_level", "medium")).lower()
         self.compression_level.setCurrentIndex(max(0, self.compression_level.findData(saved_level)))
-        form.addRow("Сила сжатия", self.compression_level)
+        form.addRow(tr("Сила сжатия"), self.compression_level)
         self.compression_note = QLabel()
         self.compression_note.setObjectName("Muted")
         self.compression_note.setWordWrap(True)
@@ -1215,53 +1219,52 @@ class GitArchiveWindow(QMainWindow):
         self.update_storage_format_controls()
 
         self.cpu_priority = QComboBox()
-        self.cpu_priority.addItem("Минимальный — Idle", "idle")
-        self.cpu_priority.addItem("Ниже обычного", "below_normal")
-        self.cpu_priority.addItem("Обычный", "normal")
+        self.cpu_priority.addItem(tr("Минимальный — Idle"), "idle")
+        self.cpu_priority.addItem(tr("Ниже обычного"), "below_normal")
+        self.cpu_priority.addItem(tr("Обычный"), "normal")
         saved_cpu_priority = normalize_cpu_priority(self.config.get("background_cpu_priority", "idle"))
         self.cpu_priority.setCurrentIndex(max(0, self.cpu_priority.findData(saved_cpu_priority)))
-        form.addRow("Приоритет ЦП фоновых задач", self.cpu_priority)
+        form.addRow(tr("Приоритет ЦП фоновых задач"), self.cpu_priority)
 
         self.memory_priority = QComboBox()
-        self.memory_priority.addItem("Минимальный", "very_low")
-        self.memory_priority.addItem("Низкий", "low")
-        self.memory_priority.addItem("Обычный", "normal")
+        self.memory_priority.addItem(tr("Минимальный"), "very_low")
+        self.memory_priority.addItem(tr("Низкий"), "low")
+        self.memory_priority.addItem(tr("Обычный"), "normal")
         saved_memory_priority = normalize_memory_priority(
             self.config.get("background_memory_priority", "very_low")
         )
         self.memory_priority.setCurrentIndex(max(0, self.memory_priority.findData(saved_memory_priority)))
-        form.addRow("Приоритет памяти фоновых задач", self.memory_priority)
+        form.addRow(tr("Приоритет памяти фоновых задач"), self.memory_priority)
 
         priority_note = QLabel(
-            "Настройки применяются к Rust-движку, Git и 7-Zip. Сам интерфейс остаётся с обычным приоритетом. "
-            "Приоритет памяти влияет на вытеснение страниц из ОЗУ, но не ограничивает объём выделенной памяти."
+            tr("Настройки применяются к Rust-движку, Git и 7-Zip. Сам интерфейс остаётся с обычным приоритетом. " + "Приоритет памяти влияет на вытеснение страниц из ОЗУ, но не ограничивает объём выделенной памяти.")
         )
         priority_note.setObjectName("Muted")
         priority_note.setWordWrap(True)
         form.addRow("", priority_note)
 
         self.theme = QComboBox()
-        for label, value in (("Как в Windows", "system"), ("Светлая", "light"), ("Тёмная", "dark")):
+        for label, value in ((tr("Как в Windows"), "system"), (tr("Светлая"), "light"), (tr("Тёмная"), "dark")):
             self.theme.addItem(label, value)
         self.theme.setCurrentIndex(max(0, self.theme.findData(self.config["theme"])))
-        form.addRow("Тема", self.theme)
-        self.start_with_windows = QCheckBox("Запускать вместе с Windows")
+        form.addRow(tr("Тема"), self.theme)
+        self.start_with_windows = QCheckBox(tr("Запускать вместе с Windows"))
         self.start_with_windows.setChecked(bool(self.config.get("start_with_windows", False)))
-        form.addRow("Автозапуск", self.start_with_windows)
-        self.close_to_tray = QCheckBox("При закрытии сворачивать в системный трей")
+        form.addRow(tr("Автозапуск"), self.start_with_windows)
+        self.close_to_tray = QCheckBox(tr("При закрытии сворачивать в системный трей"))
         self.close_to_tray.setChecked(bool(self.config.get("close_to_tray", True)))
-        form.addRow("Поведение окна", self.close_to_tray)
-        self.proxy_enabled = QCheckBox("Использовать прокси для HTTPS Git-соединений")
+        form.addRow(tr("Поведение окна"), self.close_to_tray)
+        self.proxy_enabled = QCheckBox(tr("Использовать прокси для HTTPS Git-соединений"))
         self.proxy_enabled.setChecked(bool(self.config.get("proxy_enabled", False)))
-        form.addRow("Прокси", self.proxy_enabled)
+        form.addRow(tr("Прокси"), self.proxy_enabled)
         self.proxy_type = QComboBox()
         for proxy_label in ("HTTP", "HTTPS", "SOCKS4", "SOCKS5"):
             self.proxy_type.addItem(proxy_label, proxy_label)
         self.proxy_type.setCurrentIndex(max(0, self.proxy_type.findData(self.config.get("proxy_type", "SOCKS5"))))
-        form.addRow("Тип прокси", self.proxy_type)
+        form.addRow(tr("Тип прокси"), self.proxy_type)
         proxy_row = QHBoxLayout()
         self.proxy_host = QLineEdit(str(self.config.get("proxy_host", "127.0.0.1")))
-        self.proxy_host.setPlaceholderText("Адрес прокси")
+        self.proxy_host.setPlaceholderText(tr("Адрес прокси"))
         self.proxy_port = QSpinBox()
         self.proxy_port.setRange(1, 65535)
         self.proxy_port.setValue(int(self.config.get("proxy_port", 1080)))
@@ -1270,13 +1273,13 @@ class GitArchiveWindow(QMainWindow):
         proxy_row.addWidget(self.proxy_port)
         proxy_widget = QWidget()
         proxy_widget.setLayout(proxy_row)
-        form.addRow("Сервер / порт", proxy_widget)
+        form.addRow(tr("Сервер / порт"), proxy_widget)
         s.addWidget(card)
-        note = QLabel("Лимит мягкий: при достижении порога новые задачи ставятся на паузу. Уже начатая загрузка может превысить его. Архивы автоматически не удаляются.")
+        note = QLabel(tr("Лимит мягкий: при достижении порога новые задачи ставятся на паузу. Уже начатая загрузка может превысить его. Архивы автоматически не удаляются."))
         note.setObjectName("Muted")
         note.setWordWrap(True)
         s.addWidget(note)
-        save = QPushButton("Сохранить настройки")
+        save = QPushButton(tr("Сохранить настройки"))
         save.setObjectName("Accent")
         save.clicked.connect(self.save_settings)
         s.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
@@ -1287,7 +1290,7 @@ class GitArchiveWindow(QMainWindow):
 
     def make_table(self) -> QTableWidget:
         table = QTableWidget(0, 4)
-        table.setHorizontalHeaderLabels(["Репозиторий", "Состояние", "Последняя синхронизация", "Размер"])
+        table.setHorizontalHeaderLabels([tr("Репозиторий"), tr("Состояние"), tr("Последняя синхронизация"), tr("Размер")])
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1309,13 +1312,13 @@ class GitArchiveWindow(QMainWindow):
         if icon.isNull():
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray.setIcon(icon)
-        self.tray.setToolTip("GitArchive — локальный архив Git-репозиториев")
+        self.tray.setToolTip(tr("GitArchive — локальный архив Git-репозиториев"))
         menu = QMenu()
-        show = QAction("Открыть GitArchive", self)
+        show = QAction(tr("Открыть GitArchive"), self)
         show.triggered.connect(self.show_from_tray)
-        sync = QAction("Синхронизировать сейчас", self)
+        sync = QAction(tr("Синхронизировать сейчас"), self)
         sync.triggered.connect(self.sync_all)
-        exit_action = QAction("Выход", self)
+        exit_action = QAction(tr("Выход"), self)
         exit_action.triggered.connect(self.exit_app)
         menu.addAction(show)
         menu.addAction(sync)
@@ -1327,7 +1330,7 @@ class GitArchiveWindow(QMainWindow):
 
     def go(self, page: int) -> None:
         self.pages.setCurrentIndex(page)
-        self.heading.setText(("Обзор", "Репозитории", "Журнал", "Настройки")[page])
+        self.heading.setText((tr("Обзор"), tr("Репозитории"), tr("Журнал"), tr("Настройки"))[page])
         for index, button in enumerate(self.nav):
             button.setChecked(index == page)
 
@@ -1350,7 +1353,7 @@ class GitArchiveWindow(QMainWindow):
         if self.config.get("close_to_tray", True) and self.tray.isVisible() and not self.allow_exit:
             event.ignore()
             self.hide()
-            self.tray.showMessage(APP_NAME, "GitArchive продолжает работу в системном трее.", QSystemTrayIcon.MessageIcon.Information, 2500)
+            self.tray.showMessage(APP_NAME, tr("GitArchive продолжает работу в системном трее."), QSystemTrayIcon.MessageIcon.Information, 2500)
         else:
             self.flush_logs()
             self.lan_service.stop()
@@ -1378,8 +1381,7 @@ class GitArchiveWindow(QMainWindow):
 
     def add_repository(self) -> None:
         prompt = (
-            "HTTPS или SSH clone URL (GitHub, GitLab, Codeberg, Bitbucket, "
-            "Gitea, Forgejo или свой сервер):"
+            tr("HTTPS или SSH clone URL (GitHub, GitLab, Codeberg, Bitbucket, " + "Gitea, Forgejo или свой сервер):")
         )
         clipboard_value = QApplication.clipboard().text().strip()
         try:
@@ -1389,7 +1391,7 @@ class GitArchiveWindow(QMainWindow):
 
         value, ok = QInputDialog.getText(
             self,
-            "Добавить Git-репозиторий",
+            tr("Добавить Git-репозиторий"),
             prompt,
             QLineEdit.EchoMode.Normal,
             clipboard_value,
@@ -1399,7 +1401,7 @@ class GitArchiveWindow(QMainWindow):
         try:
             url, namespace, name, host, provider = parse_git_url(value)
         except ValueError as error:
-            QMessageBox.warning(self, "Ссылка не распознана", str(error))
+            QMessageBox.warning(self, tr("Ссылка не распознана"), str(error))
             return
 
         storage_format = str(self.config.get("new_storage_format", "folder")).lower()
@@ -1410,9 +1412,8 @@ class GitArchiveWindow(QMainWindow):
         if storage_format != "folder" and not seven_zip:
             QMessageBox.warning(
                 self,
-                "Нужен 7-Zip",
-                "Для хранения в ZIP или 7z установи 7-Zip и перезапусти GitArchive. "
-                "Новые репозитории пока можно сохранять в обычной папке .git.",
+                tr("Нужен 7-Zip"),
+                tr("Для хранения в ZIP или 7z установи 7-Zip и перезапусти GitArchive. " + "Новые репозитории пока можно сохранять в обычной папке .git."),
             )
             return
 
@@ -1425,7 +1426,7 @@ class GitArchiveWindow(QMainWindow):
             )
             if existing_identity == identity:
                 QMessageBox.information(
-                    self, "Уже добавлен", "Этот репозиторий уже есть в GitArchive."
+                    self, tr("Уже добавлен"), tr("Этот репозиторий уже есть в GitArchive.")
                 )
                 return
 
@@ -1447,13 +1448,13 @@ class GitArchiveWindow(QMainWindow):
             "local_path": str(path),
             "storage_format": storage_format,
             "compression_level": compression_level,
-            "status": "В очереди",
+            "status": tr("В очереди"),
             "last_sync": None,
             "last_error": "",
         }
         self.config["repositories"].append(repo)
         save_config(self.config)
-        self.log(f"Добавлен {repository_label(repo)} · формат: {storage_format}")
+        self.log(tr(f"Добавлен {repository_label(repo)} · формат: {storage_format}"))
         self.refresh()
         self.scan_sizes()
         self.sync_one(repo["id"])
@@ -1467,12 +1468,12 @@ class GitArchiveWindow(QMainWindow):
         if not repo:
             return
         menu = QMenu(self)
-        open_history = menu.addAction("Открыть")
-        sync = menu.addAction("Обновить")
-        open_folder = menu.addAction("Открыть папку архива")
-        restore = menu.addAction("Восстановить рабочую копию")
+        open_history = menu.addAction(tr("Открыть"))
+        sync = menu.addAction(tr("Обновить"))
+        open_folder = menu.addAction(tr("Открыть папку архива"))
+        restore = menu.addAction(tr("Восстановить рабочую копию"))
         menu.addSeparator()
-        remove = menu.addAction("Удалить из списка")
+        remove = menu.addAction(tr("Удалить из списка"))
         chosen = menu.exec(table.viewport().mapToGlobal(position))
         if chosen == open_history:
             self.open_commit_history(table)
@@ -1494,22 +1495,22 @@ class GitArchiveWindow(QMainWindow):
         if storage_format == "folder":
             if not (archive / "HEAD").is_file() or not (archive / "objects").is_dir():
                 QMessageBox.information(
-                    self, "Архив ещё не готов",
-                    "Сначала дождись первой успешной синхронизации этого репозитория."
+                    self, tr("Архив ещё не готов"),
+                    tr("Сначала дождись первой успешной синхронизации этого репозитория.")
                 )
                 return
             self.show_commit_history(archive, repo.get("name", "repository"))
             return
 
         if not archive.is_file():
-            QMessageBox.information(self, "Архив ещё не готов", "Сначала дождись первой успешной синхронизации этого репозитория.")
+            QMessageBox.information(self, tr("Архив ещё не готов"), tr("Сначала дождись первой успешной синхронизации этого репозитория."))
             return
         if not self.core.is_file():
-            QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat, чтобы собрать движок.")
+            QMessageBox.warning(self, tr("Rust-движок не найден"), tr("Запусти start.bat, чтобы собрать движок."))
             return
         seven_zip = self.seven_zip_path or find_7zip()
         if not seven_zip:
-            QMessageBox.warning(self, "Нужен 7-Zip", "Для чтения сжатого архива установи 7-Zip и перезапусти GitArchive.")
+            QMessageBox.warning(self, tr("Нужен 7-Zip"), tr("Для чтения сжатого архива установи 7-Zip и перезапусти GitArchive."))
             return
 
         temporary_root = Path(tempfile.mkdtemp(prefix=".gitarchive-history-", dir=str(archive.parent)))
@@ -1531,7 +1532,7 @@ class GitArchiveWindow(QMainWindow):
                 self.history_materialized(w, root, name, code, stdout, stderr)
         )
         self.thread_pool.start(worker)
-        self.log(f"Распаковка {repository_label(repo)} во временную папку для просмотра коммитов.")
+        self.log(tr(f"Распаковка {repository_label(repo)} во временную папку для просмотра коммитов."))
 
     def history_materialized(
         self,
@@ -1548,8 +1549,8 @@ class GitArchiveWindow(QMainWindow):
         if code != 0 or not (mirror / "HEAD").is_file() or not (mirror / "objects").is_dir():
             shutil.rmtree(temporary_root, ignore_errors=True)
             QMessageBox.warning(
-                self, "Не удалось открыть историю",
-                stderr or stdout or "Не удалось безопасно распаковать архив для просмотра."
+                self, tr("Не удалось открыть историю"),
+                stderr or stdout or tr("Не удалось безопасно распаковать архив для просмотра.")
             )
             return
         self.show_commit_history(mirror, repo_name, cleanup_root=temporary_root)
@@ -1578,9 +1579,8 @@ class GitArchiveWindow(QMainWindow):
     def remove_repository(self, repo: dict) -> None:
         answer = QMessageBox.question(
             self,
-            "Убрать репозиторий из списка?",
-            f"{repository_label(repo)} будет удалён из списка GitArchive.\n"
-            "Локальный архив на диске останется нетронутым.",
+            tr("Убрать репозиторий из списка?"),
+            tr(f"{repository_label(repo)} будет удалён из списка GitArchive.\n" + "Локальный архив на диске останется нетронутым."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1588,8 +1588,8 @@ class GitArchiveWindow(QMainWindow):
             return
         if repo.get("id") in self.processes:
             QMessageBox.warning(
-                self, "Синхронизация выполняется",
-                "Дождись завершения синхронизации перед удалением записи."
+                self, tr("Синхронизация выполняется"),
+                tr("Дождись завершения синхронизации перед удалением записи.")
             )
             return
         self.config["repositories"] = [
@@ -1607,14 +1607,14 @@ class GitArchiveWindow(QMainWindow):
                 self.sync_batch_paused = False
             self.update_sidebar_progress()
         save_config(self.config)
-        self.log(f"Убран из списка (архив сохранён): {repository_label(repo)}")
+        self.log(tr(f"Убран из списка (архив сохранён): {repository_label(repo)}"))
         self.refresh()
         self.scan_sizes()
 
     def selected_repo(self, table: QTableWidget) -> dict | None:
         row = table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Выбор проекта", "Выбери репозиторий в таблице.")
+            QMessageBox.information(self, tr("Выбор проекта"), tr("Выбери репозиторий в таблице."))
             return None
         cell = table.item(row, 0)
         repo_id = cell.data(Qt.ItemDataRole.UserRole) if cell else None
@@ -1627,7 +1627,7 @@ class GitArchiveWindow(QMainWindow):
 
     def restore_selected(self, repo_override: dict | None = None) -> None:
         if self.restore_process and self.restore_process.state() != QProcess.ProcessState.NotRunning:
-            QMessageBox.information(self, "Восстановление уже идёт", "Дождись завершения текущего восстановления.")
+            QMessageBox.information(self, tr("Восстановление уже идёт"), tr("Дождись завершения текущего восстановления."))
             return
 
         repo = repo_override or self.selected_repo(self.repo_table)
@@ -1640,20 +1640,20 @@ class GitArchiveWindow(QMainWindow):
         else:
             archive_ready = archive.is_file()
         if not archive_ready:
-            QMessageBox.information(self, "Архив не найден", "Сначала дождись первой успешной синхронизации репозитория.")
+            QMessageBox.information(self, tr("Архив не найден"), tr("Сначала дождись первой успешной синхронизации репозитория."))
             return
         if not self.core.is_file():
-            QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat, чтобы собрать движок.")
+            QMessageBox.warning(self, tr("Rust-движок не найден"), tr("Запусти start.bat, чтобы собрать движок."))
             return
 
         seven_zip = self.seven_zip_path or find_7zip()
         if storage_format != "folder" and not seven_zip:
-            QMessageBox.warning(self, "Нужен 7-Zip", "Для восстановления ZIP/7z установи 7-Zip и перезапусти GitArchive.")
+            QMessageBox.warning(self, tr("Нужен 7-Zip"), tr("Для восстановления ZIP/7z установи 7-Zip и перезапусти GitArchive."))
             return
 
         parent = QFileDialog.getExistingDirectory(
             self,
-            "Куда восстановить рабочую копию",
+            tr("Куда восстановить рабочую копию"),
             str(Path.home()),
         )
         if not parent:
@@ -1662,8 +1662,8 @@ class GitArchiveWindow(QMainWindow):
         if destination.exists():
             QMessageBox.warning(
                 self,
-                "Папка уже существует",
-                f"GitArchive не будет перезаписывать существующую папку:\n{destination}",
+                tr("Папка уже существует"),
+                tr(f"GitArchive не будет перезаписывать существующую папку:\n{destination}"),
             )
             return
 
@@ -1675,7 +1675,7 @@ class GitArchiveWindow(QMainWindow):
         process.errorOccurred.connect(lambda error, p=process: self.restore_error(p, error))
         self.restore_process = process
         self.restore_destination = destination
-        self.log(f"Восстановление {repository_label(repo)} → {destination}")
+        self.log(tr(f"Восстановление {repository_label(repo)} → {destination}"))
         arguments = [
             "restore", "--archive", str(archive),
             "--destination", str(destination),
@@ -1700,20 +1700,20 @@ class GitArchiveWindow(QMainWindow):
         process.deleteLater()
 
         if code == 0 and destination is not None:
-            self.log(f"Рабочая копия восстановлена: {destination}")
+            self.log(tr(f"Рабочая копия восстановлена: {destination}"))
             QMessageBox.information(
                 self,
-                "Восстановление завершено",
-                f"Рабочая копия и сохранённые исторические refs восстановлены в:\n{destination}",
+                tr("Восстановление завершено"),
+                tr(f"Рабочая копия и сохранённые исторические refs восстановлены в:\n{destination}"),
             )
             if sys.platform == "win32":
                 os.startfile(str(destination))
         else:
-            self.log(f"Восстановление завершилось с ошибкой (код {code}). Локальный архив не изменён.")
+            self.log(tr(f"Восстановление завершилось с ошибкой (код {code}). Локальный архив не изменён."))
             QMessageBox.warning(
                 self,
-                "Ошибка восстановления",
-                "Не удалось полностью восстановить рабочую копию. Подробности находятся в журнале. Исходный архив не изменялся.",
+                tr("Ошибка восстановления"),
+                tr("Не удалось полностью восстановить рабочую копию. Подробности находятся в журнале. Исходный архив не изменялся."),
             )
 
     def restore_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
@@ -1723,8 +1723,8 @@ class GitArchiveWindow(QMainWindow):
             self.restore_process = None
             self.restore_destination = None
         process.deleteLater()
-        self.log("Не удалось запустить Rust-движок для восстановления.")
-        QMessageBox.warning(self, "Ошибка запуска", "Не удалось запустить Rust-движок.")
+        self.log(tr("Не удалось запустить Rust-движок для восстановления."))
+        QMessageBox.warning(self, tr("Ошибка запуска"), tr("Не удалось запустить Rust-движок."))
 
     def open_selected_folder(self, table: QTableWidget | None = None) -> None:
         repo = self.selected_repo(table or self.repo_table)
@@ -1732,7 +1732,7 @@ class GitArchiveWindow(QMainWindow):
             return
         path = Path(repo["local_path"])
         if not path.exists():
-            QMessageBox.information(self, "Архива пока нет", "Файл или папка появится после первой успешной синхронизации.")
+            QMessageBox.information(self, tr("Архива пока нет"), tr("Файл или папка появится после первой успешной синхронизации."))
             return
         target = path.parent if path.is_file() else path
         if sys.platform == "win32":
@@ -1746,7 +1746,7 @@ class GitArchiveWindow(QMainWindow):
         if repo_id in self.processes or repo_id in self.queue:
             return
         if not self.core.is_file():
-            QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat: он соберёт Rust-движок и откроет приложение.")
+            QMessageBox.warning(self, tr("Rust-движок не найден"), tr("Запусти start.bat: он соберёт Rust-движок и откроет приложение."))
             return
         if not self.processes and not self.queue:
             self.sync_batch_total = 0
@@ -1756,7 +1756,7 @@ class GitArchiveWindow(QMainWindow):
             self.sync_progress.clear()
         self.queue.append(repo_id)
         self.sync_batch_total += 1
-        self.sync_progress[repo_id] = {"percent": 0, "phase": "Подготовка"}
+        self.sync_progress[repo_id] = {"percent": 0, "phase": tr("Подготовка")}
         self.update_sidebar_progress()
         self.start_queued()
 
@@ -1772,7 +1772,7 @@ class GitArchiveWindow(QMainWindow):
             if repo_id and repo_id not in self.processes and repo_id not in self.queue:
                 self.queue.append(repo_id)
                 self.sync_batch_total += 1
-                self.sync_progress[repo_id] = {"percent": 0, "phase": "В очереди"}
+                self.sync_progress[repo_id] = {"percent": 0, "phase": tr("В очереди")}
         self.update_sidebar_progress()
         self.start_queued()
         self.refresh()
@@ -1795,12 +1795,12 @@ class GitArchiveWindow(QMainWindow):
                 for repo_id in pending_ids:
                     repo = self.find_repo(repo_id)
                     if repo:
-                        repo["status"] = "Ожидание лимита"
+                        repo["status"] = tr("Ожидание лимита")
                     self.sync_progress.pop(repo_id, None)
                 self.sync_batch_completed += len(pending_ids)
                 self.sync_batch_paused = True
                 self.queue.clear()
-                self.log("Достигнут лимит хранилища. Новые синхронизации приостановлены; архивы сохранены.")
+                self.log(tr("Достигнут лимит хранилища. Новые синхронизации приостановлены; архивы сохранены."))
                 self.update_sidebar_progress()
                 break
 
@@ -1819,10 +1819,10 @@ class GitArchiveWindow(QMainWindow):
 
             seven_zip = self.seven_zip_path or find_7zip()
             if storage_format != "folder" and not seven_zip:
-                repo["status"] = "Ошибка — нужен 7-Zip"
-                repo["last_error"] = "Для ZIP/7z требуется установленный 7-Zip CLI."
+                repo["status"] = tr("Ошибка — нужен 7-Zip")
+                repo["last_error"] = tr("Для ZIP/7z требуется установленный 7-Zip CLI.")
                 save_config(self.config)
-                self.log(f"Пропуск {repository_label(repo)}: 7-Zip не найден.")
+                self.log(tr(f"Пропуск {repository_label(repo)}: 7-Zip не найден."))
                 self.complete_sync_progress(repo_id, failed=True)
                 continue
 
@@ -1830,14 +1830,15 @@ class GitArchiveWindow(QMainWindow):
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             process.setProcessEnvironment(background_process_environment(self.config))
             process.readyReadStandardOutput.connect(lambda p=process: self.read_output(p))
+            process.started.connect(lambda p=process: self.sync_process_started(p))
             process.finished.connect(lambda code, _status, p=process: self.finished(p, code))
             process.errorOccurred.connect(lambda error, p=process: self.process_error(p, error))
             self.processes[repo_id] = process
-            self.sync_progress[repo_id] = {"percent": 0, "phase": "Запуск"}
-            repo["status"] = "Синхронизация"
+            self.sync_progress[repo_id] = {"percent": 0, "phase": tr("Запуск")}
+            repo["status"] = tr("Синхронизация")
             repo["last_error"] = ""
             save_config(self.config)
-            self.log(f"Начата синхронизация {repository_label(repo)}")
+            self.log(tr(f"Начата синхронизация {repository_label(repo)}"))
             current_compression = str(self.config.get("compression_level") or "medium")
             previous_compression = str(repo.get("compression_level") or "medium")
             arguments = [
@@ -1852,14 +1853,66 @@ class GitArchiveWindow(QMainWindow):
             if storage_format != "folder" and seven_zip:
                 arguments.extend(["--seven-zip", seven_zip])
             process.setProperty("gitarchive_compression_level", current_compression)
+            now = time.monotonic()
+            process.setProperty("gitarchive_started_at", now)
+            process.setProperty("gitarchive_last_output_at", now)
+            process.setProperty("gitarchive_last_heartbeat_at", now)
             process.start(str(self.core), arguments)
         self.refresh()
+
+    def check_sync_watchdog(self) -> None:
+        """Log a heartbeat for active syncs even when Git has stopped producing output."""
+        if not self.processes:
+            return
+        now = time.monotonic()
+        for repo_id, process in list(self.processes.items()):
+            started = float(process.property("gitarchive_started_at") or now)
+            last_output = float(process.property("gitarchive_last_output_at") or started)
+            last_heartbeat = float(process.property("gitarchive_last_heartbeat_at") or started)
+            if now - last_heartbeat < 60:
+                continue
+            process.setProperty("gitarchive_last_heartbeat_at", now)
+            elapsed = max(0, int(now - started))
+            idle = max(0, int(now - last_output))
+            repo = self.find_repo(repo_id)
+            if idle >= 180 and repo:
+                waiting_status = tr("Нет вывода от Git")
+                if repo.get("status") != waiting_status:
+                    repo["status"] = waiting_status
+                    repo["last_error"] = tr(
+                        "Git не отправлял вывод более 3 минут. Процесс ещё работает; это может быть ожидание сети, диска или локальная обработка объектов."
+                    )
+                    save_config(self.config)
+                    self.refresh()
+            label = repository_label(repo) if repo else repo_id
+            self.log(
+                f"{label}: "
+                + tr("Синхронизация всё ещё выполняется. Прошло {} с; новых данных от Git нет {} с.").format(
+                    elapsed, idle
+                )
+            )
+
+    def sync_process_started(self, process: QProcess) -> None:
+        repo_id = next((key for key, item in self.processes.items() if item is process), None)
+        if repo_id is None:
+            return
+        now = time.monotonic()
+        process.setProperty("gitarchive_started_at", now)
+        process.setProperty("gitarchive_last_output_at", now)
+        process.setProperty("gitarchive_last_heartbeat_at", now)
+        self.log(tr("Запущен Rust-процесс синхронизации, PID: {}.").format(int(process.processId())))
 
     def read_output(self, process: QProcess) -> None:
         text = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
         repo_id = next((key for key, item in self.processes.items() if item is process), None)
         repo = self.find_repo(repo_id) if repo_id else None
         if repo_id and text:
+            process.setProperty("gitarchive_last_output_at", time.monotonic())
+            if repo and repo.get("status") == tr("Нет вывода от Git"):
+                repo["status"] = tr("Синхронизация")
+                repo["last_error"] = ""
+                self.refresh()
+                self.log(tr("Git снова передал данные; синхронизация продолжается."))
             progress = parse_sync_progress(text)
             if progress:
                 percent, phase = progress
@@ -1895,12 +1948,12 @@ class GitArchiveWindow(QMainWindow):
         if total <= 0:
             self.sidebar_sync_bar.setValue(0)
             if not self.config["repositories"]:
-                self.sidebar_sync_label.setText("Пока нет репозиториев")
-                self.sidebar_sync_detail.setText("Добавь Git-репозиторий")
+                self.sidebar_sync_label.setText(tr("Пока нет репозиториев"))
+                self.sidebar_sync_detail.setText(tr("Добавь Git-репозиторий"))
             else:
-                self.sidebar_sync_label.setText("Ожидание синхронизации")
+                self.sidebar_sync_label.setText(tr("Ожидание синхронизации"))
                 self.sidebar_sync_detail.setText(
-                    f"Репозиториев: {len(self.config['repositories'])}"
+                    tr(f"Репозиториев: {len(self.config['repositories'])}")
                 )
             return
 
@@ -1914,29 +1967,29 @@ class GitArchiveWindow(QMainWindow):
 
         if active_count == 0 and queued_count == 0 and completed >= total:
             if self.sync_batch_paused:
-                self.sidebar_sync_label.setText("Пауза · лимит хранилища")
-                self.sidebar_sync_detail.setText("Часть задач ожидает освобождения места")
+                self.sidebar_sync_label.setText(tr("Пауза · лимит хранилища"))
+                self.sidebar_sync_detail.setText(tr("Часть задач ожидает освобождения места"))
             elif self.sync_batch_errors:
-                self.sidebar_sync_label.setText("Завершено с ошибками")
+                self.sidebar_sync_label.setText(tr("Завершено с ошибками"))
                 success_count = max(0, completed - self.sync_batch_errors)
                 self.sidebar_sync_detail.setText(
-                    f"{success_count} успешно · {self.sync_batch_errors} ошибок"
+                    tr(f"{success_count} успешно · {self.sync_batch_errors} ошибок")
                 )
             else:
-                self.sidebar_sync_label.setText("Синхронизация завершена")
-                self.sidebar_sync_detail.setText(f"{completed} из {total} репозиториев")
+                self.sidebar_sync_label.setText(tr("Синхронизация завершена"))
+                self.sidebar_sync_detail.setText(tr(f"{completed} из {total} репозиториев"))
             return
 
         if active_count:
-            self.sidebar_sync_label.setText(f"Синхронизация · {overall}%")
+            self.sidebar_sync_label.setText(tr(f"Синхронизация · {overall}%"))
         else:
-            self.sidebar_sync_label.setText("Ожидание запуска")
+            self.sidebar_sync_label.setText(tr("Ожидание запуска"))
         phases = [
             str(self.sync_progress.get(repo_id, {}).get("phase") or "")
             for repo_id in active_ids
         ]
         phase = next((item for item in phases if item), "")
-        detail = f"{active_count} активн. · {queued_count} в очереди · {completed}/{total} готово"
+        detail = tr(f"{active_count} активн. · {queued_count} в очереди · {completed}/{total} готово")
         self.sidebar_sync_detail.setText(f"{phase} · {detail}" if phase else detail)
 
     def process_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
@@ -1946,8 +1999,8 @@ class GitArchiveWindow(QMainWindow):
         repo_id = next((key for key, item in self.processes.items() if item is process), None)
         repo = self.find_repo(repo_id) if repo_id else None
         if repo:
-            repo["status"] = "Ошибка запуска"
-            repo["last_error"] = "Не удалось запустить Rust-движок."
+            repo["status"] = tr("Ошибка запуска")
+            repo["last_error"] = tr("Не удалось запустить Rust-движок.")
             self.processes.pop(repo_id, None)
             self.complete_sync_progress(repo_id, failed=True)
         process.deleteLater()
@@ -1966,18 +2019,18 @@ class GitArchiveWindow(QMainWindow):
         repo = self.find_repo(repo_id)
         if repo:
             if code == 0:
-                repo["status"] = "Готово"
+                repo["status"] = tr("Готово")
                 repo["last_sync"] = datetime.now().astimezone().isoformat(timespec="minutes")
                 repo["last_error"] = ""
                 if repository_storage_format(repo) != "folder":
                     used_level = process.property("gitarchive_compression_level")
                     if used_level:
                         repo["compression_level"] = str(used_level)
-                self.log(f"Готово: {repository_label(repo)}")
+                self.log(tr(f"Готово: {repository_label(repo)}"))
             else:
-                repo["status"] = "Ошибка — архив сохранён"
-                repo["last_error"] = f"Код завершения: {code}"
-                self.log(f"Ошибка обновления {repository_label(repo)}; локальное зеркало оставлено на месте.")
+                repo["status"] = tr("Ошибка — архив сохранён")
+                repo["last_error"] = tr(f"Код завершения: {code}")
+                self.log(tr(f"Ошибка обновления {repository_label(repo)}; локальное зеркало оставлено на месте."))
         save_config(self.config)
         process.deleteLater()
         self.refresh()
@@ -2033,16 +2086,21 @@ class GitArchiveWindow(QMainWindow):
                         last = datetime.fromisoformat(last).strftime("%d.%m.%Y %H:%M")
                 except ValueError:
                     pass
-                values = (repository_label(repo), repo.get("status", "Добавлен"), last, human_size(bytes_used) if bytes_used else "—")
+                values = (
+                    repository_label(repo),
+                    tr(str(repo.get("status") or tr("Добавлен"))),
+                    last,
+                    human_size(bytes_used) if bytes_used else "—",
+                )
                 for col, value in enumerate(values):
                     cell = QTableWidgetItem(value)
                     if col == 0:
                         cell.setData(Qt.ItemDataRole.UserRole, repo.get("id"))
                     if col == 1:
-                        cell.setToolTip(repo.get("last_error", ""))
+                        cell.setToolTip(tr(str(repo.get("last_error", ""))))
                     table.setItem(row, col, cell)
             table.resizeRowsToContents()
-        self.hint.setText(f"Занято {human_size(size)} из {self.config['max_storage_gb']} ГБ. Архивы не удаляются при недоступности исходного проекта.")
+        self.hint.setText(tr(f"Занято {human_size(size)} из {self.config['max_storage_gb']} ГБ. Архивы не удаляются при недоступности исходного проекта."))
         self.update_sidebar_progress()
 
     def load_logs(self) -> list[str]:
@@ -2088,7 +2146,7 @@ class GitArchiveWindow(QMainWindow):
                 self.log_view.ensureCursorVisible()
 
     def choose_storage(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Папка для новых архивов", self.storage_edit.text())
+        path = QFileDialog.getExistingDirectory(self, tr("Папка для новых архивов"), self.storage_edit.text())
         if path:
             self.storage_edit.setText(path)
 
@@ -2097,41 +2155,38 @@ class GitArchiveWindow(QMainWindow):
         compressed = storage_format in {"zip", "7z"}
         self.compression_level.setEnabled(compressed and bool(self.seven_zip_path))
         if not self.seven_zip_path:
-            note = "ZIP и 7z требуют установленный 7-Zip с консольным файлом 7z.exe. После установки перезапусти GitArchive."
+            note = tr("ZIP и 7z требуют установленный 7-Zip с консольным файлом 7z.exe. После установки перезапусти GitArchive.")
         elif not compressed:
-            note = "Папка .git — рекомендуемый вариант: Git обновляет её на месте без повторной распаковки и сжатия."
+            note = tr("Папка .git — рекомендуемый вариант: Git обновляет её на месте без повторной распаковки и сжатия.")
         elif storage_format == "zip":
             note = (
-                "ZIP совместим почти со всеми архиваторами. При обновлении зеркало временно распаковывается "
-                "и собирается заново. Используется один поток 7-Zip; выигрыш в размере может быть небольшим."
+                tr("ZIP совместим почти со всеми архиваторами. При обновлении зеркало временно распаковывается " + "и собирается заново. Используется один поток 7-Zip; выигрыш в размере может быть небольшим.")
             )
         else:
             note = (
-                "7z обычно сжимает лучше ZIP, но обновление медленнее. Один поток, словарь до 64 МБ; "
-                "дополнительная экономия места может быть небольшой."
+                tr("7z обычно сжимает лучше ZIP, но обновление медленнее. Один поток, словарь до 64 МБ; " + "дополнительная экономия места может быть небольшой.")
             )
         note += (
-            " Формат применяется только к новым репозиториям; уровень сжатия — ко всем ZIP/7z "
-            "при следующей синхронизации. Автоматической миграции формата нет."
+            tr(" Формат применяется только к новым репозиториям; уровень сжатия — ко всем ZIP/7z " + "при следующей синхронизации. Автоматической миграции формата нет.")
         )
         self.compression_note.setText(note)
 
     def save_settings(self) -> None:
         storage = self.storage_edit.text().strip()
         if not storage:
-            QMessageBox.warning(self, "Папка не указана", "Укажи папку для новых архивов.")
+            QMessageBox.warning(self, tr("Папка не указана"), tr("Укажи папку для новых архивов."))
             return
         try:
             Path(storage).expanduser().mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            QMessageBox.warning(self, "Ошибка папки", str(error))
+            QMessageBox.warning(self, tr("Ошибка папки"), str(error))
             return
 
         new_storage_format = str(self.storage_format.currentData() or "folder")
         compression_level = str(self.compression_level.currentData() or "medium")
         self.seven_zip_path = find_7zip()
         if new_storage_format in {"zip", "7z"} and not self.seven_zip_path:
-            QMessageBox.warning(self, "Нужен 7-Zip", "Для ZIP/7z установи 7-Zip и перезапусти GitArchive.")
+            QMessageBox.warning(self, tr("Нужен 7-Zip"), tr("Для ZIP/7z установи 7-Zip и перезапусти GitArchive."))
             return
 
         self.config.update({
@@ -2155,15 +2210,15 @@ class GitArchiveWindow(QMainWindow):
             proxy_url(self.config)
             set_windows_autostart(bool(self.config["start_with_windows"]))
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "Настройки не применены", str(error))
+            QMessageBox.warning(self, tr("Настройки не применены"), str(error))
             return
         save_config(self.config)
         self.sync_timer.setInterval(self.interval.value() * 60000)
         self.apply_theme()
         self.refresh()
         self.start_queued()
-        self.log("Настройки сохранены.")
-        QMessageBox.information(self, "GitArchive", "Настройки сохранены.")
+        self.log(tr("Настройки сохранены."))
+        QMessageBox.information(self, "GitArchive", tr("Настройки сохранены."))
 
     def check_theme(self) -> None:
         if self.config.get("theme") == "system" and (self.dark != windows_dark_theme() or self.accent != windows_accent()):
@@ -2234,8 +2289,8 @@ def main() -> int:
     if not instance_lock.tryLock(0):
         QMessageBox.information(
             None,
-            "GitArchive уже запущен",
-            "Программа уже работает. Открой её из системного трея.",
+            tr("GitArchive уже запущен"),
+            tr("Программа уже работает. Открой её из системного трея."),
         )
         return 0
 

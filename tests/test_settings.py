@@ -1,6 +1,7 @@
 import unittest
 
 from gitarchive.app import parse_sync_progress, proxy_url
+from gitarchive.i18n import tr
 
 
 class ProxySettingsTests(unittest.TestCase):
@@ -56,7 +57,7 @@ class SyncProgressTests(unittest.TestCase):
     def test_parses_seven_zip_percentage_output(self):
         self.assertEqual(
             parse_sync_progress("  67%\\r"),
-            (67, "Архивация / распаковка"),
+            (67, tr("Архивация / распаковка")),
         )
 
     def test_ignores_output_without_progress(self):

@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from gitarchive.i18n import tr
 from gitarchive.repository import archive_path, folder_size, human_size, parse_git_url
 
 
@@ -98,7 +99,7 @@ class GitRemoteUrlTests(unittest.TestCase):
                 "dev/team",
                 "repo",
                 "git.example.net:8443",
-                "Свой Git-сервер",
+                tr("Свой Git-сервер"),
             ),
         )
 
@@ -110,7 +111,7 @@ class GitRemoteUrlTests(unittest.TestCase):
                 "team",
                 "project",
                 "git.internal.lan",
-                "Свой Git-сервер",
+                tr("Свой Git-сервер"),
             ),
         )
 
@@ -122,7 +123,7 @@ class GitRemoteUrlTests(unittest.TestCase):
                 "team",
                 "project",
                 "git.example.net:2222",
-                "Свой Git-сервер",
+                tr("Свой Git-сервер"),
             ),
         )
 
@@ -134,7 +135,7 @@ class GitRemoteUrlTests(unittest.TestCase):
                 "team",
                 "project",
                 "git.example.net",
-                "Свой Git-сервер",
+                tr("Свой Git-сервер"),
             ),
         )
 
@@ -217,9 +218,9 @@ class GitRemoteUrlTests(unittest.TestCase):
 
 class ArchiveSizeTests(unittest.TestCase):
     def test_human_size(self):
-        self.assertEqual(human_size(0), "0 Б")
-        self.assertEqual(human_size(1024), "1.0 КБ")
-        self.assertEqual(human_size(1024 ** 2), "1.0 МБ")
+        self.assertEqual(human_size(0), f"0 {tr('Б')}")
+        self.assertEqual(human_size(1024), f"1.0 {tr('КБ')}")
+        self.assertEqual(human_size(1024 ** 2), f"1.0 {tr('МБ')}")
 
     def test_folder_size(self):
         with tempfile.TemporaryDirectory() as temporary:

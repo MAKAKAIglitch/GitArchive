@@ -23,9 +23,10 @@
 - Never prune remote refs or delete a local mirror when its source becomes unavailable.
 - Run up to three folder-format syncs concurrently by default; compressed archive updates are serialized to keep CPU and disk load predictable.
 - Show local archive sizes and apply a global **soft** storage limit.
-- Configure low CPU and memory priority for background engine / Git / 7-Zip processes, with a live synchronization progress panel in the sidebar.
+- Configure low CPU and memory priority for background engine / Git / 7-Zip processes, with a live synchronization progress panel and a no-output watchdog in the sidebar.
 - Keep a persistent local activity log and prevent multiple app instances from writing to the same mirrors.
 - Minimize to the Windows notification area (system tray).
+- Automatically select Russian or English from the current Windows user UI language (other system languages fall back to Russian).
 - Follow Windows light/dark preference and system accent color; request Mica on supported Windows 11 builds.
 - Browse up to 250 commits from the local archive, inspect commit metadata and changed-file summaries, and export any selected commit as a ZIP snapshot.
 - Open a repository context menu with history, sync, open archive, restore, and remove-from-list actions. Removing a list entry never deletes the archive.
@@ -95,6 +96,10 @@ The selected values are passed to background processes at launch. They do not ch
 
 The sidebar shows the current synchronization batch. Its percentage is a live estimate based on Git / 7-Zip progress phases and equally weighted active repositories; it is not a byte-weighted overall transfer percentage.
 
+GitArchive also writes a **sync heartbeat once per minute** while a Rust synchronization process is still running, even when Git has not produced new output. After three minutes without output, the repository row changes to **No Git output** and the log records elapsed time and output-idle time. This is a diagnostic state, not an automatic cancellation: Git may be waiting for the network, disk, or local object processing, and a large but active transfer is left running. When Git output resumes, the row returns to **Synchronizing**.
+
+For HTTPS, Git is configured to abort a transfer only when throughput remains below **512 bytes/s for 180 seconds**. Default OpenSSH connections use a 20-second connection/handshake timeout and TCP keepalive probes; an explicitly configured SSH command is preserved. The default SSH command is non-interactive, so a passphrase-protected key must be available through `ssh-agent`. These network guards do not impose a maximum total duration on a healthy large transfer.
+
 ## Build a Windows portable app and installer
 
 Install Python 3.11+, Rust stable, Git for Windows, and (for the installer) Inno Setup 6 or 7. Then run:
@@ -103,7 +108,7 @@ Install Python 3.11+, Rust stable, Git for Windows, and (for the installer) Inno
 build_windows.bat
 ```
 
-The script generates the Windows multi-resolution icon from the source SVG, builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Outputs:
+The script generates the Windows multi-resolution icon from the source SVG, builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Every build run captures standard output and errors in a timestamped \`yyyy-MM-dd_HH-mm-ss.log\` file in the same directory as \`build_windows.bat\`; the script prints the captured log when the build ends and returns the original build exit code. The log files are ignored by Git. Outputs:
 
 - Portable application: `dist\\GitArchive\\GitArchive.exe` plus its adjacent runtime files.
 - Installer: `dist-installer\\GitArchive-Setup.exe` (when Inno Setup is installed).
@@ -125,6 +130,10 @@ The first LAN / ZeroTier transfer implementation is available from **Repositorie
 - The receiving computer needs enough free space for the incoming bundle and temporary verification mirror. At most two incoming transfers are accepted concurrently.
 
 This is an early implementation, not yet a fully tested release. It currently supports private IPv4 discovery and folder mirrors; IPv6 discovery, automatic subnet discovery for very large overlay networks, incremental object-only transfer, compressed archive transfer, and transfer progress reporting remain future work. See [docs/NETWORK_SYNC_DESIGN.md](docs/NETWORK_SYNC_DESIGN.md) for protocol and limitations.
+
+## Language selection
+
+GitArchive currently supports Russian and English. On Windows it uses the current user's UI language via `GetUserDefaultUILanguage`: English UI selects English; other UI languages fall back to Russian. The language is selected at application start, so restart GitArchive after changing the Windows display language. The app does not change Windows language settings.
 
 ## Run on Windows
 
