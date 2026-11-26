@@ -60,6 +60,83 @@ class ThrottledHttpProxyTests(unittest.TestCase):
             ThrottledHttpProxy._matches_no_proxy("example.org", 443, ".example.com")
         )
 
+    def test_download_limit_is_shared_across_multiple_tunnels(self):
+        payload = b"y" * 800
+        target = socket.socket()
+        target.bind(("127.0.0.1", 0))
+        target.listen(2)
+        target.settimeout(5)
+        target_port = target.getsockname()[1]
+        errors = []
+        received_payloads = []
+
+        def serve_targets():
+            connections = []
+            try:
+                for _ in range(2):
+                    connection, _ = target.accept()
+                    connections.append(connection)
+                for connection in connections:
+                    connection.sendall(payload)
+            except OSError as error:
+                errors.append(error)
+            finally:
+                for connection in connections:
+                    connection.close()
+
+        server_thread = threading.Thread(target=serve_targets, daemon=True)
+        proxy = ThrottledHttpProxy(1000)
+        clients = []
+
+        def download_one():
+            try:
+                port = int(proxy.url.rsplit(":", 1)[1])
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
+                    client.settimeout(4)
+                    client.sendall(
+                        (
+                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\\r\\n"
+                            f"Host: 127.0.0.1:{target_port}\\r\\n\\r\\n"
+                        ).encode("ascii")
+                    )
+                    response = bytearray()
+                    while b"\\r\\n\\r\\n" not in response:
+                        response.extend(client.recv(1024))
+                    header, _separator, initial_payload = response.partition(b"\\r\\n\\r\\n")
+                    if b"200 Connection Established" not in header:
+                        raise AssertionError("CONNECT tunnel was not established")
+                    data = bytearray(initial_payload)
+                    while len(data) < len(payload):
+                        chunk = client.recv(4096)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                    received_payloads.append(bytes(data))
+            except Exception as error:
+                errors.append(error)
+
+        try:
+            proxy.start()
+            server_thread.start()
+            started = time.monotonic()
+            clients = [threading.Thread(target=download_one, daemon=True) for _ in range(2)]
+            for client_thread in clients:
+                client_thread.start()
+            for client_thread in clients:
+                client_thread.join(timeout=5)
+            elapsed = time.monotonic() - started
+            server_thread.join(timeout=2)
+            self.assertTrue(all(not client_thread.is_alive() for client_thread in clients))
+            self.assertEqual(errors, [])
+            self.assertEqual(received_payloads, [payload, payload])
+            # 1.6 KB over one shared 1 KB/s bucket, not two independent buckets.
+            self.assertGreaterEqual(elapsed, 1.2)
+        finally:
+            proxy.close()
+            target.close()
+            if server_thread.is_alive():
+                server_thread.join(timeout=1)
+
     def test_download_is_rate_limited(self):
         payload = b"x" * 1500
         target = socket.socket()
