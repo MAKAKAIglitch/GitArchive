@@ -519,6 +519,8 @@ class GitArchiveWindow(QMainWindow):
         self.seven_zip_path = find_7zip()
         self.sync_batch_total = 0
         self.sync_batch_completed = 0
+        self.sync_batch_errors = 0
+        self.sync_batch_paused = False
         self.sync_progress: dict[str, dict[str, object]] = {}
         self.allow_exit = False
         self.dark = True
@@ -1303,6 +1305,8 @@ class GitArchiveWindow(QMainWindow):
         if not self.processes and not self.queue:
             self.sync_batch_total = 0
             self.sync_batch_completed = 0
+            self.sync_batch_errors = 0
+            self.sync_batch_paused = False
             self.sync_progress.clear()
         self.queue.append(repo_id)
         self.sync_batch_total += 1
@@ -1314,6 +1318,8 @@ class GitArchiveWindow(QMainWindow):
         if not self.processes and not self.queue:
             self.sync_batch_total = 0
             self.sync_batch_completed = 0
+            self.sync_batch_errors = 0
+            self.sync_batch_paused = False
             self.sync_progress.clear()
         for repo in self.config["repositories"]:
             repo_id = repo.get("id")
@@ -1346,6 +1352,7 @@ class GitArchiveWindow(QMainWindow):
                         repo["status"] = "Ожидание лимита"
                     self.sync_progress.pop(repo_id, None)
                 self.sync_batch_completed += len(pending_ids)
+                self.sync_batch_paused = True
                 self.queue.clear()
                 self.log("Достигнут лимит хранилища. Новые синхронизации приостановлены; архивы сохранены.")
                 self.update_sidebar_progress()
@@ -1354,7 +1361,7 @@ class GitArchiveWindow(QMainWindow):
             repo_id = self.queue.pop(0)
             repo = self.find_repo(repo_id)
             if not repo:
-                self.complete_sync_progress(repo_id)
+                self.complete_sync_progress(repo_id, failed=True)
                 continue
 
             storage_format = repository_storage_format(repo)
@@ -1370,7 +1377,7 @@ class GitArchiveWindow(QMainWindow):
                 repo["last_error"] = "Для ZIP/7z требуется установленный 7-Zip CLI."
                 save_config(self.config)
                 self.log(f"Пропуск {repository_label(repo)}: 7-Zip не найден.")
-                self.complete_sync_progress(repo_id)
+                self.complete_sync_progress(repo_id, failed=True)
                 continue
 
             process = QProcess(self)
@@ -1417,12 +1424,14 @@ class GitArchiveWindow(QMainWindow):
             if line.strip():
                 self.log(prefix + line.strip())
 
-    def complete_sync_progress(self, repo_id: str) -> None:
+    def complete_sync_progress(self, repo_id: str, failed: bool = False) -> None:
         self.sync_progress.pop(repo_id, None)
         self.sync_batch_completed = min(
             self.sync_batch_total,
             self.sync_batch_completed + 1,
         )
+        if failed:
+            self.sync_batch_errors += 1
         self.update_sidebar_progress()
 
     def update_sidebar_progress(self) -> None:
@@ -1458,8 +1467,18 @@ class GitArchiveWindow(QMainWindow):
         self.sidebar_sync_bar.setValue(overall)
 
         if active_count == 0 and queued_count == 0 and completed >= total:
-            self.sidebar_sync_label.setText("Синхронизация завершена")
-            self.sidebar_sync_detail.setText(f"{completed} из {total} репозиториев")
+            if self.sync_batch_paused:
+                self.sidebar_sync_label.setText("Пауза · лимит хранилища")
+                self.sidebar_sync_detail.setText("Часть задач ожидает освобождения места")
+            elif self.sync_batch_errors:
+                self.sidebar_sync_label.setText("Завершено с ошибками")
+                success_count = max(0, completed - self.sync_batch_errors)
+                self.sidebar_sync_detail.setText(
+                    f"{success_count} успешно · {self.sync_batch_errors} ошибок"
+                )
+            else:
+                self.sidebar_sync_label.setText("Синхронизация завершена")
+                self.sidebar_sync_detail.setText(f"{completed} из {total} репозиториев")
             return
 
         if active_count:
@@ -1484,7 +1503,7 @@ class GitArchiveWindow(QMainWindow):
             repo["status"] = "Ошибка запуска"
             repo["last_error"] = "Не удалось запустить Rust-движок."
             self.processes.pop(repo_id, None)
-            self.complete_sync_progress(repo_id)
+            self.complete_sync_progress(repo_id, failed=True)
         process.deleteLater()
         save_config(self.config)
         self.refresh()
@@ -1497,7 +1516,7 @@ class GitArchiveWindow(QMainWindow):
             process.deleteLater()
             return
         self.processes.pop(repo_id, None)
-        self.complete_sync_progress(repo_id)
+        self.complete_sync_progress(repo_id, failed=code != 0)
         repo = self.find_repo(repo_id)
         if repo:
             if code == 0:
