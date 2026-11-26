@@ -824,7 +824,7 @@ def main() -> int:
     QApplication.setApplicationName(APP_NAME)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setStyle("Fusion")
+    # Keep Qt's native Windows widget style; the app stylesheet adds Fluent layout and surfaces.
 
     # Do not let two instances update the same bare mirrors simultaneously.
     instance_lock = QLockFile(str(data_dir() / "instance.lock"))
