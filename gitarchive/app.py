@@ -9,10 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
-from .repository import (
-    folder_size, human_size, parse_repository_url, provider_name,
-    safe_path_part, storage_key,
-)
+from .repository import archive_path, folder_size, human_size, parse_git_url
 
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -448,7 +445,7 @@ class GitArchiveWindow(QMainWindow):
         if not ok:
             return
         try:
-            url, host, namespace, name = parse_repository_url(value)
+            url, namespace, name, host, provider = parse_git_url(value)
         except ValueError as error:
             QMessageBox.warning(self, "Ссылка не распознана", str(error))
             return
@@ -466,16 +463,11 @@ class GitArchiveWindow(QMainWindow):
                 )
                 return
 
-        path = (
-            Path(self.config["storage_path"])
-            / storage_key(host)
-            / Path(*(safe_path_part(part) for part in namespace.split("/")))
-            / f"{safe_path_part(name)}.git"
-        )
+        path = archive_path(Path(self.config["storage_path"]), host, namespace, name)
         repo = {
             "id": uuid.uuid4().hex,
             "host": host,
-            "provider": provider_name(host),
+            "provider": provider,
             "namespace": namespace,
             "owner": namespace,
             "name": name,
@@ -649,7 +641,7 @@ class GitArchiveWindow(QMainWindow):
             repo["status"] = "Синхронизация"
             repo["last_error"] = ""
             save_config(self.config)
-            self.log(f"Начата синхронизация {repo['owner']}/{repo['name']}")
+            self.log(f"Начата синхронизация {repository_label(repo)}")
             process.start(str(self.core), ["sync", "--url", repo["url"], "--destination", repo["local_path"]])
         self.refresh()
 
@@ -694,7 +686,7 @@ class GitArchiveWindow(QMainWindow):
             else:
                 repo["status"] = "Ошибка — архив сохранён"
                 repo["last_error"] = f"Код завершения: {code}"
-                self.log(f"Ошибка обновления {repo['owner']}/{repo['name']}; локальное зеркало оставлено на месте.")
+                self.log(f"Ошибка обновления {repository_label(repo)}; локальное зеркало оставлено на месте.")
         save_config(self.config)
         process.deleteLater()
         self.refresh()
