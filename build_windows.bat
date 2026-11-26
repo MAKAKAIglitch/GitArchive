@@ -23,12 +23,18 @@ exit /b %BUILD_EXIT%
 :build_inner
 title GitArchive - Windows build
 
+rem Prefer the interpreter selected by PATH (for example, actions/setup-python).
+rem Do not use "py -3": it may silently select Python 3.15 even when PATH points to 3.11.
 set "PYTHON_CMD=python"
-where py >nul 2>nul
-if not errorlevel 1 set "PYTHON_CMD=py -3"
-%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)"
+where python >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] Python 3.11+ was not found. Ensure py.exe or python.exe is in PATH.
+    where py >nul 2>nul
+    if not errorlevel 1 set "PYTHON_CMD=py -3.11"
+)
+%PYTHON_CMD% -c "import sys; print('[INFO] Build Python: ' + sys.version.replace(chr(10), ' ')); raise SystemExit(0 if (3,11) <= sys.version_info < (3,15) else 1)"
+if errorlevel 1 (
+    echo [ERROR] Python 3.11-3.14 is required for the current PyInstaller Windows bundle.
+    echo [ERROR] Ensure python.exe on PATH or py -3.11 is available.
     exit /b 1
 )
 where cargo >nul 2>nul
@@ -77,6 +83,13 @@ if not exist "rust-core\target\release\gitarchive-core.exe" (
 if not exist "dist\GitArchive\rust-core" mkdir "dist\GitArchive\rust-core"
 copy /Y "rust-core\target\release\gitarchive-core.exe" "dist\GitArchive\rust-core\gitarchive-core.exe" >nul
 if errorlevel 1 goto :failed
+
+echo [TEST] Smoke-testing the frozen application imports...
+"dist\GitArchive\GitArchive.exe" --self-test
+if errorlevel 1 (
+    echo [ERROR] Frozen application failed its startup/import smoke test.
+    goto :failed
+)
 
 echo [SUCCESS] Portable application is ready: dist\GitArchive\GitArchive.exe
 
