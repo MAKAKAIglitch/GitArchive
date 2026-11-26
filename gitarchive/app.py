@@ -143,6 +143,10 @@ def load_config() -> dict:
             config.update(saved)
         if not isinstance(config.get("repositories"), list):
             config["repositories"] = []
+        if str(config.get("new_storage_format", "folder")).lower() not in {"folder", "zip", "7z"}:
+            config["new_storage_format"] = "folder"
+        if str(config.get("compression_level", "medium")).lower() not in {"min", "medium", "max"}:
+            config["compression_level"] = "medium"
         return config
     except (OSError, ValueError):
         return defaults()
@@ -1217,6 +1221,7 @@ class GitArchiveWindow(QMainWindow):
                 arguments.append("--force-repack")
             if storage_format != "folder" and seven_zip:
                 arguments.extend(["--seven-zip", seven_zip])
+            process.setProperty("gitarchive_compression_level", current_compression)
             process.start(str(self.core), arguments)
         self.refresh()
 
@@ -1258,7 +1263,9 @@ class GitArchiveWindow(QMainWindow):
                 repo["last_sync"] = datetime.now().astimezone().isoformat(timespec="minutes")
                 repo["last_error"] = ""
                 if repository_storage_format(repo) != "folder":
-                    repo["compression_level"] = str(self.config.get("compression_level") or "medium")
+                    used_level = process.property("gitarchive_compression_level")
+                    if used_level:
+                        repo["compression_level"] = str(used_level)
                 self.log(f"Готово: {repository_label(repo)}")
             else:
                 repo["status"] = "Ошибка — архив сохранён"
