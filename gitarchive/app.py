@@ -1915,6 +1915,7 @@ class GitArchiveWindow(QMainWindow):
             and self.sync_batch_total <= self.sync_batch_completed
         ):
             self.sidebar_sync_card.hide()
+            self.sidebar_sync_bar.setValue(0)
 
     def start_queued(self) -> None:
         if self.size_scan_running or not self.size_scan_ready:
@@ -2090,6 +2091,12 @@ class GitArchiveWindow(QMainWindow):
             self.sidebar_sync_bar.setValue(0)
             self.sidebar_sync_card.hide()
             return
+
+        # A newly queued batch starts from zero even if the previous batch's
+        # completion animation has not finished hiding the card yet.
+        if completed == 0 and active_count == 0 and queued_count > 0:
+            self.sidebar_progress_animation.stop()
+            self.sidebar_sync_bar.setValue(0)
 
         # Keep the widget visible only while a batch is active or deliberately paused.
         self.sidebar_sync_card.show()
