@@ -8,3 +8,9 @@ __pycache__/
 rust-core/target/
 .DS_Store
 Thumbs.db
+
+# Windows packaged builds
+/build/
+/dist/
+/dist-installer/
+*.spec
