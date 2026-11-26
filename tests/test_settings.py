@@ -81,7 +81,7 @@ class SyncProgressTests(unittest.TestCase):
 
     def test_parses_seven_zip_percentage_output(self):
         self.assertEqual(
-            parse_sync_progress("  67%\\r"),
+            parse_sync_progress("  67%\r"),
             (67, tr("Архивация / распаковка")),
         )
 
