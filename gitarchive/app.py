@@ -250,13 +250,16 @@ class CommitHistoryDialog(QDialog):
         self.selected_sha = str(sha)
         self.download.setEnabled(True)
         self.details.setPlainText("Загрузка сведений о коммите…")
+        requested_sha = self.selected_sha
         self.run_git([
             "git", "--git-dir", str(self.archive),
             "show", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
-            "--stat", "--patch", "--summary", "--format=fuller", self.selected_sha,
-        ], self.commit_loaded)
+            "--stat", "--patch", "--summary", "--format=fuller", requested_sha,
+        ], lambda code, stdout, stderr: self.commit_loaded(requested_sha, code, stdout, stderr))
 
-    def commit_loaded(self, code: int, stdout: str, stderr: str) -> None:
+    def commit_loaded(self, requested_sha: str, code: int, stdout: str, stderr: str) -> None:
+        if requested_sha != self.selected_sha:
+            return
         self.details.setPlainText(stdout if code == 0 else (stderr or "Не удалось прочитать коммит."))
 
     def export_commit(self) -> None:
