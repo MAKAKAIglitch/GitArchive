@@ -19,6 +19,13 @@ enum Commands {
         #[arg(long)]
         destination: PathBuf,
     },
+    /// Restore a normal working copy from a local GitArchive mirror.
+    Restore {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -33,6 +40,9 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Sync { url, destination } => sync_mirror(&url, &destination).await,
+        Commands::Restore { archive, destination } => {
+            restore_mirror(&archive, &destination).await
+        }
     }
 }
 
@@ -76,6 +86,60 @@ async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
     }
 
     println!("SUCCESS: Mirror is up to date.");
+    Ok(())
+}
+
+async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
+    if !archive.join("HEAD").is_file() || !archive.join("objects").is_dir() {
+        bail!("Source is not a valid bare GitArchive mirror: {}", archive.display());
+    }
+    if destination.exists() {
+        bail!(
+            "Restore destination already exists; choose a new empty path: {}",
+            destination.display()
+        );
+    }
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Cannot create restore directory {}", parent.display()))?;
+    }
+
+    println!("INFO: Creating a working copy from the local archive.");
+    let status = Command::new("git")
+        .args(["clone", "--progress"])
+        .arg(archive)
+        .arg(destination)
+        .status()
+        .await
+        .context("Could not start Git restore clone")?;
+    if !status.success() {
+        // The destination did not exist before this operation, so only this
+        // newly-created partial clone may be removed after a failed clone.
+        if destination.exists() {
+            let _ = tokio::fs::remove_dir_all(destination).await;
+        }
+        bail!("Git restore clone failed (exit code: {:?}).", status.code());
+    }
+
+    println!("INFO: Restoring preserved historical refs.");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(destination)
+        .args(["fetch", "--no-tags", "--force", "--progress"])
+        .arg(archive)
+        .arg("+refs/gitarchive/snapshots/*:refs/gitarchive/snapshots/*")
+        .status()
+        .await
+        .context("Could not fetch preserved historical refs")?;
+    if !status.success() {
+        bail!(
+            "Working copy was created, but archived historical refs could not be fetched (exit code: {:?}). The source archive is unchanged.",
+            status.code()
+        );
+    }
+
+    println!("SUCCESS: Working copy restored; historical refs are available under refs/gitarchive/snapshots/.");
     Ok(())
 }
 
