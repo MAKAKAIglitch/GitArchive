@@ -25,6 +25,8 @@ enum Commands {
         storage_format: String,
         #[arg(long, default_value = "medium")]
         compression_level: String,
+        #[arg(long, default_value_t = false)]
+        force_repack: bool,
         #[arg(long)]
         seven_zip: Option<PathBuf>,
     },
@@ -68,12 +70,14 @@ async fn run() -> Result<()> {
             destination,
             storage_format,
             compression_level,
+            force_repack,
             seven_zip,
         } => sync_mirror(
             &url,
             &destination,
             &storage_format,
             &compression_level,
+            force_repack,
             seven_zip.as_deref(),
         )
         .await,
@@ -168,6 +172,7 @@ async fn sync_mirror(
     destination: &Path,
     requested_format: &str,
     requested_level: &str,
+    force_repack: bool,
     seven_zip_path: Option<&Path>,
 ) -> Result<()> {
     validate_git_url(url)?;
@@ -179,7 +184,7 @@ async fn sync_mirror(
     }
 
     let level = compression_code(requested_level)?;
-    sync_compressed_mirror(url, destination, storage_format, level, seven_zip_path).await
+    sync_compressed_mirror(url, destination, storage_format, level, force_repack, seven_zip_path).await
 }
 
 async fn sync_folder_mirror(url: &str, destination: &Path) -> Result<()> {
@@ -233,6 +238,7 @@ async fn sync_compressed_mirror(
     destination: &Path,
     format: &str,
     level: u8,
+    force_repack: bool,
     seven_zip_path: Option<&Path>,
 ) -> Result<()> {
     let parent = parent_directory(destination);
@@ -256,7 +262,11 @@ async fn sync_compressed_mirror(
             bail!("The compressed archive does not contain a valid mirror.git bare repository.");
         }
         println!("INFO: Preserving old refs and fetching remote changes.");
-        fetch_existing_mirror(&mirror).await?;
+        let refs_changed = fetch_existing_mirror(&mirror).await?;
+        if !refs_changed && !force_repack {
+            println!("INFO: No remote refs changed; keeping the compressed archive untouched.");
+            return Ok(());
+        }
     } else {
         clone_mirror(url, &mirror).await?;
     }
@@ -672,8 +682,28 @@ async fn check_git() -> Result<()> {
     Ok(())
 }
 
-async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
+async fn list_remote_refs(repository: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .output()
+        .await
+        .context("Could not list refs before comparing the archive")?;
+    if !output.status.success() {
+        bail!("Could not inspect Git refs before comparing the archive.");
+    }
+    let refs = String::from_utf8_lossy(&output.stdout);
+    Ok(refs
+        .lines()
+        .filter(|line| !line.starts_with("refs/gitarchive/"))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn fetch_existing_mirror(destination: &Path) -> Result<bool> {
     println!("INFO: Existing archive found; preserving current refs before fetch.");
+    let refs_before = list_remote_refs(destination).await?;
     snapshot_refs(destination).await?;
     println!("INFO: Fetching remote refs without pruning.");
 
@@ -697,7 +727,13 @@ async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
             status.code()
         );
     }
-    Ok(())
+    let refs_after = list_remote_refs(destination).await?;
+    let changed = refs_before != refs_after;
+    println!(
+        "INFO: Remote refs {}.",
+        if changed { "changed" } else { "did not change" }
+    );
+    Ok(changed)
 }
 
 fn valid_git_host(host: &str) -> bool {
