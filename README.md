@@ -12,8 +12,9 @@
 - Preserve old ref tips before each fetch under `refs/gitarchive/snapshots/`, retaining history after force-pushes.
 - Restore a normal working copy from a local mirror, including archived historical refs.
 - Never prune remote refs or delete a local mirror when its source becomes unavailable.
-- Run several repository syncs concurrently (three by default).
+- Run several repository syncs concurrently (three by default) and stream Git transfer progress into the activity log.
 - Show local archive sizes and apply a global **soft** storage limit.
+- Keep a persistent local activity log and prevent multiple app instances from writing to the same mirrors.
 - Minimize to the Windows notification area (system tray).
 - Follow Windows light/dark preference and system accent color; request Mica on supported Windows 11 builds.
 
@@ -45,11 +46,11 @@ git -C ".\repo-restored" fetch --no-tags --force "$HOME\GitArchive\owner\repo.gi
 
 ## Archive boundaries and storage limit
 
-This version archives **Git repository data**: branches, tags, and reachable Git objects. It does not yet download GitHub Releases attachments, the GitHub Wiki, Issues, Pull Requests, Actions artifacts, or Git LFS object payloads. Git LFS pointers remain in Git history until dedicated LFS archiving is added.
+This version archives **Git repository data**: branches, tags, and reachable Git objects. It does not yet download GitHub Releases attachments, the GitHub Wiki, Issues, Pull Requests, Actions artifacts, Git LFS object payloads, or the separate repositories referenced by submodules. Git LFS pointers remain in Git history until dedicated LFS archiving is added; submodule repositories should be added to GitArchive separately.
 
 The storage limit is intentionally a **soft limit**. Git cannot provide a reliable exact estimate of every object a fetch will add before downloading it. GitArchive checks total archive size before starting queued work and pauses new jobs after the configured limit is reached; already-running parallel fetches can exceed it by the total amount downloaded before they finish. Existing archives are never automatically deleted to make room.
 
-If a fetch fails (for example, because a repository was deleted, made private, or the network is unavailable), GitArchive reports an error and leaves the last local mirror untouched. A fetch error alone cannot prove that a repository was deleted.
+If a fetch fails (for example, because a repository was deleted, made private, or the network is unavailable), GitArchive reports an error and leaves the last local mirror untouched. A fetch error alone cannot prove that a repository was deleted. A restored working copy uses the local archive as its `origin`, so it can continue to reference the archive even when the original GitHub repository is gone.
 
 Private repositories use credentials already configured for Git (for example, Git Credential Manager or SSH keys). GitArchive does not ask for or store a GitHub personal access token.
 
