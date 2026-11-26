@@ -148,7 +148,7 @@ impl ProcessPriority {
 #[cfg(windows)]
 const PROCESS_SET_INFORMATION: u32 = 0x0200;
 #[cfg(windows)]
-const PROCESS_MEMORY_PRIORITY_CLASS: i32 = 0x27;
+const PROCESS_MEMORY_PRIORITY_CLASS: i32 = 0; // ProcessMemoryPriority
 
 #[cfg(windows)]
 #[repr(C)]
