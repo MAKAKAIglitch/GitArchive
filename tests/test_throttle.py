@@ -95,14 +95,14 @@ class ThrottledHttpProxyTests(unittest.TestCase):
                     client.settimeout(4)
                     client.sendall(
                         (
-                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\\r\\n"
-                            f"Host: 127.0.0.1:{target_port}\\r\\n\\r\\n"
+                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
+                            f"Host: 127.0.0.1:{target_port}\r\n\r\n"
                         ).encode("ascii")
                     )
                     response = bytearray()
-                    while b"\\r\\n\\r\\n" not in response:
+                    while b"\r\n\r\n" not in response:
                         response.extend(client.recv(1024))
-                    header, _separator, initial_payload = response.partition(b"\\r\\n\\r\\n")
+                    header, _separator, initial_payload = response.partition(b"\r\n\r\n")
                     if b"200 Connection Established" not in header:
                         raise AssertionError("CONNECT tunnel was not established")
                     data = bytearray(initial_payload)
