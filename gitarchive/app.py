@@ -117,6 +117,8 @@ class GitArchiveWindow(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.processes: dict[str, QProcess] = {}
+        self.restore_process: QProcess | None = None
+        self.restore_destination: Path | None = None
         self.queue: list[str] = []
         self.logs: list[str] = self.load_logs()
         self.size_cache: dict[str, int] = {}
@@ -257,7 +259,8 @@ class GitArchiveWindow(QMainWindow):
         for text, name, callback in (
             ("＋  Добавить", "Accent", self.add_repository),
             ("⟳  Обновить выбранный", "Secondary", self.sync_selected),
-            ("Открыть папку", "Secondary", self.open_selected_folder),
+            ("Открыть архив", "Secondary", self.open_selected_folder),
+            ("Восстановить копию", "Secondary", self.restore_selected),
         ):
             button = QPushButton(text)
             button.setObjectName(name)
@@ -397,6 +400,8 @@ class GitArchiveWindow(QMainWindow):
         for process in list(self.processes.values()):
             if process.state() != QProcess.ProcessState.NotRunning:
                 process.terminate()
+        if self.restore_process and self.restore_process.state() != QProcess.ProcessState.NotRunning:
+            self.restore_process.terminate()
         self.tray.hide()
         QApplication.quit()
 
@@ -437,6 +442,92 @@ class GitArchiveWindow(QMainWindow):
         repo = self.selected_repo(self.repo_table)
         if repo:
             self.sync_one(repo["id"])
+
+    def restore_selected(self) -> None:
+        if self.restore_process and self.restore_process.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.information(self, "Восстановление уже идёт", "Дождись завершения текущего восстановления.")
+            return
+
+        repo = self.selected_repo(self.repo_table)
+        if not repo:
+            return
+        archive = Path(repo["local_path"])
+        if not archive.joinpath("HEAD").is_file() or not archive.joinpath("objects").is_dir():
+            QMessageBox.information(self, "Архив не найден", "Сначала дождись первой успешной синхронизации репозитория.")
+            return
+        if not self.core.is_file():
+            QMessageBox.warning(self, "Rust-движок не найден", "Запусти start.bat, чтобы собрать движок.")
+            return
+
+        parent = QFileDialog.getExistingDirectory(
+            self,
+            "Куда восстановить рабочую копию",
+            str(Path.home()),
+        )
+        if not parent:
+            return
+        destination = Path(parent) / repo["name"]
+        if destination.exists():
+            QMessageBox.warning(
+                self,
+                "Папка уже существует",
+                f"GitArchive не будет перезаписывать существующую папку:\n{destination}",
+            )
+            return
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda p=process: self.read_restore_output(p))
+        process.finished.connect(lambda code, _status, p=process: self.restore_finished(p, code))
+        process.errorOccurred.connect(lambda error, p=process: self.restore_error(p, error))
+        self.restore_process = process
+        self.restore_destination = destination
+        self.log(f"Восстановление {repo['owner']}/{repo['name']} → {destination}")
+        process.start(
+            str(self.core),
+            ["restore", "--archive", str(archive), "--destination", str(destination)],
+        )
+
+    def read_restore_output(self, process: QProcess) -> None:
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            if line.strip():
+                self.log(line.strip())
+
+    def restore_finished(self, process: QProcess, code: int) -> None:
+        self.read_restore_output(process)
+        destination = self.restore_destination
+        if self.restore_process is process:
+            self.restore_process = None
+            self.restore_destination = None
+        process.deleteLater()
+
+        if code == 0 and destination is not None:
+            self.log(f"Рабочая копия восстановлена: {destination}")
+            QMessageBox.information(
+                self,
+                "Восстановление завершено",
+                f"Рабочая копия и сохранённые исторические refs восстановлены в:\n{destination}",
+            )
+            if sys.platform == "win32":
+                os.startfile(str(destination))
+        else:
+            self.log(f"Восстановление завершилось с ошибкой (код {code}). Локальный архив не изменён.")
+            QMessageBox.warning(
+                self,
+                "Ошибка восстановления",
+                "Не удалось полностью восстановить рабочую копию. Подробности находятся в журнале. Исходный архив не изменялся.",
+            )
+
+    def restore_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        if self.restore_process is process:
+            self.restore_process = None
+            self.restore_destination = None
+        process.deleteLater()
+        self.log("Не удалось запустить Rust-движок для восстановления.")
+        QMessageBox.warning(self, "Ошибка запуска", "Не удалось запустить Rust-движок.")
 
     def open_selected_folder(self, table: QTableWidget | None = None) -> None:
         repo = self.selected_repo(table or self.repo_table)
