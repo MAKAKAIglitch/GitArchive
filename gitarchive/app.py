@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QProcess, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QProcess, QLockFile, QRunnable, QStandardPaths, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QTextCursor
 from .repository import folder_size, human_size, parse_github_url
 
@@ -773,6 +773,7 @@ class GitArchiveWindow(QMainWindow):
         self.sync_timer.setInterval(self.interval.value() * 60000)
         self.apply_theme()
         self.refresh()
+        self.start_queued()
         self.log("Настройки сохранены.")
         QMessageBox.information(self, "GitArchive", "Настройки сохранены.")
 
@@ -824,6 +825,19 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+
+    # Do not let two instances update the same bare mirrors simultaneously.
+    instance_lock = QLockFile(str(data_dir() / "instance.lock"))
+    instance_lock.setStaleLockTime(30000)
+    if not instance_lock.tryLock(0):
+        QMessageBox.information(
+            None,
+            "GitArchive уже запущен",
+            "Программа уже работает. Открой её из системного трея.",
+        )
+        return 0
+
     window = GitArchiveWindow()
+    window.instance_lock = instance_lock
     window.show()
     return app.exec()
