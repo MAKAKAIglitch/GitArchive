@@ -54,6 +54,10 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt -r requirements-build.txt
 if errorlevel 1 exit /b 1
 
+echo [TEST] Running Python unit tests before expensive packaging steps...
+".venv\Scripts\python.exe" -m unittest discover -s tests -v
+if errorlevel 1 goto :failed
+
 echo [BUILD] Generating the Windows application icon...
 ".venv\Scripts\python.exe" scripts\build_icon.py --output build\GitArchive.ico
 if errorlevel 1 goto :failed
