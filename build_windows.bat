@@ -36,7 +36,7 @@ cargo build --release --jobs 1 --manifest-path rust-core\Cargo.toml
 if errorlevel 1 goto :failed
 
 echo [BUILD] Packaging the Windows application...
-".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onedir --name GitArchive gitarchive\__main__.py
+".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onedir --name GitArchive run_gitarchive.py
 if errorlevel 1 goto :failed
 
 if not exist "rust-core\target\release\gitarchive-core.exe" (
