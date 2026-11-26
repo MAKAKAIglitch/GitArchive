@@ -54,53 +54,58 @@ async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
             );
         }
 
-        println!("INFO: Existing archive found; preserving current refs before fetch.");
-        snapshot_refs(destination).await?;
-        println!("INFO: Fetching remote refs without pruning.");
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(destination)
-            // --mirror sets remote.origin.mirror=true; that mode can prune deleted refs.
-            // Override it and provide an explicit refspec so old local refs remain archived.
-            .args([
-                "-c", "remote.origin.mirror=false",
-                "-c", "fetch.prune=false",
-                "-c", "remote.origin.prune=false",
-                "fetch", "--force", "origin", "+refs/*:refs/*",
-            ])
-            .output()
-            .await
-            .context("Could not start Git fetch")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            bail!("Git fetch failed. The existing archive was kept. {} {}", stdout, stderr);
-        }
-        print_output(&output.stdout);
-        print_output(&output.stderr);
+        fetch_existing_mirror(destination).await?;
     } else {
         println!("INFO: Creating the first bare mirror.");
-        let output = Command::new("git")
-            .args(["clone", "--mirror", "--quiet"])
+        // --progress forces Git to emit progress through the QProcess pipe,
+        // so the desktop app can show live transfer activity.
+        let status = Command::new("git")
+            .args(["clone", "--mirror", "--progress"])
             .arg(url)
             .arg(destination)
-            .output()
+            .status()
             .await
             .context("Could not start Git clone")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !status.success() {
             // The target is only removed when this process created it and clone failed.
             if destination.exists() {
                 let _ = tokio::fs::remove_dir_all(destination).await;
             }
-            bail!("Git clone failed: {} {}", stdout, stderr);
+            bail!("Git clone failed (exit code: {:?}).", status.code());
         }
-        print_output(&output.stdout);
-        print_output(&output.stderr);
     }
 
     println!("SUCCESS: Mirror is up to date.");
+    Ok(())
+}
+
+async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
+    println!("INFO: Existing archive found; preserving current refs before fetch.");
+    snapshot_refs(destination).await?;
+    println!("INFO: Fetching remote refs without pruning.");
+
+    // --mirror sets remote.origin.mirror=true. Override that behavior and
+    // disable pruning explicitly, including when the user's Git config enables it.
+    // The explicit refspec updates current refs but leaves deleted remote refs local.
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(destination)
+        .args([
+            "-c", "remote.origin.mirror=false",
+            "-c", "fetch.prune=false",
+            "-c", "remote.origin.prune=false",
+            "fetch", "--progress", "--force", "origin", "+refs/*:refs/*",
+        ])
+        .status()
+        .await
+        .context("Could not start Git fetch")?;
+
+    if !status.success() {
+        bail!(
+            "Git fetch failed (exit code: {:?}). The existing archive was kept.",
+            status.code()
+        );
+    }
     Ok(())
 }
 
@@ -171,9 +176,137 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_output(bytes: &[u8]) {
-    let text = String::from_utf8_lossy(bytes);
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        println!("GIT: {line}");
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_existing_mirror;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command as StdCommand;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "gitarchive-test-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn git<I, S>(args: I) -> String
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let output = StdCommand::new("git")
+            .args(args)
+            .output()
+            .expect("Git must be installed to run integration tests");
+        assert!(
+            output.status.success(),
+            "Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn git_dir(repo: &Path, args: &[&str]) -> String {
+        let mut command = vec!["--git-dir".to_owned(), repo.to_string_lossy().into_owned()];
+        command.extend(args.iter().map(|value| (*value).to_owned()));
+        git(command)
+    }
+
+    #[tokio::test]
+    async fn force_push_and_deleted_branch_are_preserved_without_duplicate_snapshots() {
+        let root = temp_dir();
+        let source = root.join("source.git");
+        let work = root.join("work");
+        let archive = root.join("archive.git");
+        fs::create_dir_all(&root).expect("create test root");
+
+        git(["init", "--bare", source.to_str().unwrap()]);
+        git(["init", "-b", "main", work.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "config", "user.name", "GitArchive Test"]);
+        git(["-C", work.to_str().unwrap(), "config", "user.email", "gitarchive-test@example.invalid"]);
+        fs::write(work.join("history.txt"), "first\n").expect("write first commit");
+        git(["-C", work.to_str().unwrap(), "add", "."]);
+        git(["-C", work.to_str().unwrap(), "commit", "-m", "first"]);
+        let first = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(["-C", work.to_str().unwrap(), "branch", "topic"]);
+        git(["-C", work.to_str().unwrap(), "remote", "add", "origin", source.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "push", "origin", "main", "topic"]);
+
+        fs::write(work.join("history.txt"), "second\n").expect("write second commit");
+        git(["-C", work.to_str().unwrap(), "commit", "-am", "second"]);
+        let second = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(["-C", work.to_str().unwrap(), "push", "origin", "main"]);
+        git(["clone", "--mirror", source.to_str().unwrap(), archive.to_str().unwrap()]);
+
+        // Simulate user-wide prune settings in the archive's local Git config.
+        git_dir(&archive, &["config", "fetch.prune", "true"]);
+        git_dir(&archive, &["config", "remote.origin.prune", "true"]);
+
+        fs::write(work.join("history.txt"), "third\n").expect("write force-pushed commit");
+        git(["-C", work.to_str().unwrap(), "commit", "-am", "third"]);
+        let third = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(["-C", work.to_str().unwrap(), "push", "--force", "origin", "main"]);
+        git(["-C", work.to_str().unwrap(), "push", "origin", ":topic"]);
+
+        fetch_existing_mirror(&archive)
+            .await
+            .expect("mirror update should succeed");
+
+        assert_eq!(git_dir(&archive, &["rev-parse", "refs/heads/main"]), third);
+        assert_eq!(
+            git_dir(
+                &archive,
+                &["rev-parse", &format!("refs/gitarchive/snapshots/{second}/heads/main")]
+            ),
+            second,
+            "the old main tip must remain reachable after force-push"
+        );
+        assert_eq!(
+            git_dir(&archive, &["rev-parse", "refs/heads/topic"]),
+            first,
+            "a branch deleted on the remote must remain in the local mirror"
+        );
+        assert_eq!(
+            git_dir(
+                &archive,
+                &["rev-parse", &format!("refs/gitarchive/snapshots/{first}/heads/topic")]
+            ),
+            first,
+            "the deleted branch tip must also be snapshotted"
+        );
+
+        fetch_existing_mirror(&archive)
+            .await
+            .expect("second mirror update should succeed");
+        let snapshots_after_second = git_dir(
+            &archive,
+            &["for-each-ref", "--format=%(refname)", "refs/gitarchive/snapshots"],
+        )
+        .lines()
+        .count();
+
+        fetch_existing_mirror(&archive)
+            .await
+            .expect("third mirror update should succeed");
+        let snapshots_after_third = git_dir(
+            &archive,
+            &["for-each-ref", "--format=%(refname)", "refs/gitarchive/snapshots"],
+        )
+        .lines()
+        .count();
+
+        assert_eq!(
+            snapshots_after_second, snapshots_after_third,
+            "unchanged refs must not create a new snapshot on every sync"
+        );
+
+        fs::remove_dir_all(&root).expect("clean up test repositories");
     }
 }
