@@ -1204,13 +1204,17 @@ class GitArchiveWindow(QMainWindow):
             repo["last_error"] = ""
             save_config(self.config)
             self.log(f"Начата синхронизация {repository_label(repo)}")
+            current_compression = str(self.config.get("compression_level") or "medium")
+            previous_compression = str(repo.get("compression_level") or "medium")
             arguments = [
                 "sync",
                 "--url", repo["url"],
                 "--destination", repo["local_path"],
                 "--storage-format", storage_format,
-                "--compression-level", str(self.config.get("compression_level") or "medium"),
+                "--compression-level", current_compression,
             ]
+            if storage_format != "folder" and previous_compression != current_compression:
+                arguments.append("--force-repack")
             if storage_format != "folder" and seven_zip:
                 arguments.extend(["--seven-zip", seven_zip])
             process.start(str(self.core), arguments)
@@ -1253,6 +1257,8 @@ class GitArchiveWindow(QMainWindow):
                 repo["status"] = "Готово"
                 repo["last_sync"] = datetime.now().astimezone().isoformat(timespec="minutes")
                 repo["last_error"] = ""
+                if repository_storage_format(repo) != "folder":
+                    repo["compression_level"] = str(self.config.get("compression_level") or "medium")
                 self.log(f"Готово: {repository_label(repo)}")
             else:
                 repo["status"] = "Ошибка — архив сохранён"
