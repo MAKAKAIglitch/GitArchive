@@ -1242,6 +1242,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_exposes_all_archived_branches_as_remote_tracking_branches() {
+        let root = temp_dir();
+        let source = root.join("source.git");
+        let work = root.join("work");
+        let archive = root.join("archive.git");
+        let restored = root.join("restored");
+        fs::create_dir_all(&root).expect("create test root");
+
+        git(["init", "--bare", source.to_str().unwrap()]);
+        git([
+            "--git-dir",
+            source.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+        git(["init", "-b", "main", work.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "config", "user.name", "GitArchive Test"]);
+        git(["-C", work.to_str().unwrap(), "config", "user.email", "gitarchive-test@example.invalid"]);
+
+        fs::write(work.join("main.txt"), "main branch\n").expect("write main branch commit");
+        git(["-C", work.to_str().unwrap(), "add", "."]);
+        git(["-C", work.to_str().unwrap(), "commit", "-m", "main branch"]);
+        let main_sha = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+
+        git(["-C", work.to_str().unwrap(), "switch", "-c", "feature"]);
+        fs::write(work.join("feature.txt"), "feature branch\n").expect("write feature branch commit");
+        git(["-C", work.to_str().unwrap(), "add", "."]);
+        git(["-C", work.to_str().unwrap(), "commit", "-m", "feature branch"]);
+        let feature_sha = git(["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+
+        git(["-C", work.to_str().unwrap(), "remote", "add", "origin", source.to_str().unwrap()]);
+        git(["-C", work.to_str().unwrap(), "push", "origin", "main", "feature"]);
+        git(["clone", "--mirror", source.to_str().unwrap(), archive.to_str().unwrap()]);
+
+        assert_eq!(
+            git_dir(&archive, &["rev-parse", "refs/heads/main"]),
+            main_sha,
+            "the mirror must store the default branch"
+        );
+        assert_eq!(
+            git_dir(&archive, &["rev-parse", "refs/heads/feature"]),
+            feature_sha,
+            "the mirror must store non-default branches too"
+        );
+
+        restore_mirror(&archive, &restored)
+            .await
+            .expect("restore should expose all archived branches");
+
+        assert_eq!(
+            git(["-C", restored.to_str().unwrap(), "rev-parse", "refs/remotes/origin/feature"]),
+            feature_sha,
+            "non-default branches must be available as remote-tracking branches after restore"
+        );
+        let branches = git(["-C", restored.to_str().unwrap(), "branch", "--all"]);
+        assert!(
+            branches.lines().any(|line| line.trim() == "remotes/origin/feature"),
+            "the restored branch list must include origin/feature; got: {branches}"
+        );
+
+        git(["-C", restored.to_str().unwrap(), "switch", "--track", "origin/feature"]);
+        assert_eq!(
+            git(["-C", restored.to_str().unwrap(), "rev-parse", "HEAD"]),
+            feature_sha,
+            "a restored non-default branch must be check-out-able"
+        );
+
+        fs::remove_dir_all(&root).expect("clean up test repositories");
+    }
+
+    #[tokio::test]
     async fn force_push_and_deleted_branch_are_preserved_without_duplicate_snapshots() {
         let root = temp_dir();
         let source = root.join("source.git");
