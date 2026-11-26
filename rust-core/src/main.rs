@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 #[derive(Debug, Parser)]
@@ -18,6 +21,12 @@ enum Commands {
         url: String,
         #[arg(long)]
         destination: PathBuf,
+        #[arg(long, default_value = "folder")]
+        storage_format: String,
+        #[arg(long, default_value = "medium")]
+        compression_level: String,
+        #[arg(long)]
+        seven_zip: Option<PathBuf>,
     },
     /// Restore a normal working copy from a local GitArchive mirror.
     Restore {
@@ -25,6 +34,21 @@ enum Commands {
         archive: PathBuf,
         #[arg(long)]
         destination: PathBuf,
+        #[arg(long, default_value = "folder")]
+        storage_format: String,
+        #[arg(long)]
+        seven_zip: Option<PathBuf>,
+    },
+    /// Extract a compressed mirror into a new temporary directory for local inspection.
+    Materialize {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        storage_format: String,
+        #[arg(long)]
+        seven_zip: Option<PathBuf>,
     },
 }
 
@@ -39,17 +63,126 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Sync { url, destination } => sync_mirror(&url, &destination).await,
-        Commands::Restore { archive, destination } => {
-            restore_mirror(&archive, &destination).await
-        }
+        Commands::Sync {
+            url,
+            destination,
+            storage_format,
+            compression_level,
+            seven_zip,
+        } => sync_mirror(
+            &url,
+            &destination,
+            &storage_format,
+            &compression_level,
+            seven_zip.as_deref(),
+        )
+        .await,
+        Commands::Restore {
+            archive,
+            destination,
+            storage_format,
+            seven_zip,
+        } => restore_with_format(
+            &archive,
+            &destination,
+            &storage_format,
+            seven_zip.as_deref(),
+        )
+        .await,
+        Commands::Materialize {
+            archive,
+            destination,
+            storage_format,
+            seven_zip,
+        } => materialize_mirror(
+            &archive,
+            &destination,
+            &storage_format,
+            seven_zip.as_deref(),
+        )
+        .await,
     }
 }
 
-async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
+struct TempDirectory {
+    path: PathBuf,
+}
+
+impl TempDirectory {
+    fn create(parent: &Path, label: &str) -> Result<Self> {
+        for _ in 0..8 {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = parent.join(format!(
+                ".{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Cannot create temporary directory {}", path.display())
+                    });
+                }
+            }
+        }
+        bail!("Could not allocate a unique temporary directory.");
+    }
+}
+
+impl Drop for TempDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn valid_storage_format(value: &str) -> Result<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "folder" | "directory" | "git" => Ok("folder"),
+        "zip" => Ok("zip"),
+        "7z" => Ok("7z"),
+        _ => bail!("Unsupported storage format. Use folder, zip or 7z."),
+    }
+}
+
+fn compression_code(value: &str) -> Result<u8> {
+    match value.to_ascii_lowercase().as_str() {
+        "min" | "minimum" => Ok(1),
+        "medium" | "mid" => Ok(5),
+        "max" | "maximum" => Ok(9),
+        _ => bail!("Unsupported compression level. Use min, medium or max."),
+    }
+}
+
+async fn sync_mirror(
+    url: &str,
+    destination: &Path,
+    requested_format: &str,
+    requested_level: &str,
+    seven_zip_path: Option<&Path>,
+) -> Result<()> {
     validate_git_url(url)?;
     check_git().await?;
+    let storage_format = valid_storage_format(requested_format)?;
 
+    if storage_format == "folder" {
+        return sync_folder_mirror(url, destination).await;
+    }
+
+    let level = compression_code(requested_level)?;
+    sync_compressed_mirror(url, destination, storage_format, level, seven_zip_path).await
+}
+
+async fn sync_folder_mirror(url: &str, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -57,42 +190,165 @@ async fn sync_mirror(url: &str, destination: &Path) -> Result<()> {
     }
 
     if destination.exists() {
-        if !destination.join("HEAD").is_file() || !destination.join("objects").is_dir() {
+        if !is_bare_mirror(destination) {
             bail!(
                 "Destination exists but is not a bare Git repository: {}",
                 destination.display()
             );
         }
-
         fetch_existing_mirror(destination).await?;
     } else {
-        println!("INFO: Creating the first bare mirror.");
-        // --progress forces Git to emit progress through the QProcess pipe,
-        // so the desktop app can show live transfer activity.
-        let status = Command::new("git")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["clone", "--mirror", "--progress"])
-            .arg(url)
-            .arg(destination)
-            .status()
-            .await
-            .context("Could not start Git clone")?;
-        if !status.success() {
-            // The target is only removed when this process created it and clone failed.
-            if destination.exists() {
-                let _ = tokio::fs::remove_dir_all(destination).await;
-            }
-            bail!("Git clone failed (exit code: {:?}).", status.code());
-        }
+        clone_mirror(url, destination).await?;
     }
 
     println!("SUCCESS: Mirror is up to date.");
     Ok(())
 }
 
+async fn clone_mirror(url: &str, destination: &Path) -> Result<()> {
+    println!("INFO: Creating the first bare mirror.");
+    let status = Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["clone", "--mirror", "--progress"])
+        .arg(url)
+        .arg(destination)
+        .status()
+        .await
+        .context("Could not start Git clone")?;
+    if !status.success() {
+        if destination.exists() {
+            let _ = tokio::fs::remove_dir_all(destination).await;
+        }
+        bail!("Git clone failed (exit code: {:?}).", status.code());
+    }
+    Ok(())
+}
+
+fn is_bare_mirror(path: &Path) -> bool {
+    path.join("HEAD").is_file() && path.join("objects").is_dir()
+}
+
+async fn sync_compressed_mirror(
+    url: &str,
+    destination: &Path,
+    format: &str,
+    level: u8,
+    seven_zip_path: Option<&Path>,
+) -> Result<()> {
+    let parent = parent_directory(destination);
+    tokio::fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("Cannot create archive directory {}", parent.display()))?;
+    recover_archive_backup(destination)?;
+
+    if destination.exists() && !destination.is_file() {
+        bail!("Compressed archive path exists but is not a file: {}", destination.display());
+    }
+
+    let seven_zip = find_7zip(seven_zip_path)?;
+    let stage = TempDirectory::create(parent, "gitarchive-stage")?;
+    let mirror = stage.path.join("mirror.git");
+
+    if destination.is_file() {
+        println!("INFO: Extracting the previous compressed mirror into a temporary workspace.");
+        extract_compressed_archive(&seven_zip, destination, &stage.path).await?;
+        if !is_bare_mirror(&mirror) {
+            bail!("The compressed archive does not contain a valid mirror.git bare repository.");
+        }
+        println!("INFO: Preserving old refs and fetching remote changes.");
+        fetch_existing_mirror(&mirror).await?;
+    } else {
+        clone_mirror(url, &mirror).await?;
+    }
+
+    println!("INFO: Repacking the updated mirror as {format} (single-threaded).");
+    let temporary_archive = temporary_archive_path(destination, format);
+    create_compressed_archive(&seven_zip, &stage.path, &temporary_archive, format, level).await?;
+    if !temporary_archive.is_file() || temporary_archive.metadata()?.len() == 0 {
+        let _ = fs::remove_file(&temporary_archive);
+        bail!("7-Zip did not produce a valid non-empty archive.");
+    }
+
+    if let Err(error) = promote_archive(&temporary_archive, destination) {
+        let _ = fs::remove_file(&temporary_archive);
+        return Err(error);
+    }
+
+    println!("SUCCESS: Compressed mirror is up to date; the previous archive was preserved until replacement completed.");
+    Ok(())
+}
+
+async fn restore_with_format(
+    archive: &Path,
+    destination: &Path,
+    requested_format: &str,
+    seven_zip_path: Option<&Path>,
+) -> Result<()> {
+    let storage_format = valid_storage_format(requested_format)?;
+    if storage_format == "folder" {
+        return restore_mirror(archive, destination).await;
+    }
+    if !archive.is_file() {
+        bail!("Compressed GitArchive mirror not found: {}", archive.display());
+    }
+    let seven_zip = find_7zip(seven_zip_path)?;
+    let parent = parent_directory(archive);
+    let stage = TempDirectory::create(parent, "gitarchive-restore")?;
+    extract_compressed_archive(&seven_zip, archive, &stage.path).await?;
+    let mirror = stage.path.join("mirror.git");
+    if !is_bare_mirror(&mirror) {
+        bail!("The compressed archive does not contain a valid mirror.git bare repository.");
+    }
+    restore_mirror(&mirror, destination).await
+}
+
+async fn materialize_mirror(
+    archive: &Path,
+    destination: &Path,
+    requested_format: &str,
+    seven_zip_path: Option<&Path>,
+) -> Result<()> {
+    let storage_format = valid_storage_format(requested_format)?;
+    if storage_format == "folder" {
+        bail!("Materialize is only used for compressed archives.");
+    }
+    if !archive.is_file() {
+        bail!("Compressed GitArchive mirror not found: {}", archive.display());
+    }
+    if destination.exists() {
+        if !destination.is_dir()
+            || fs::read_dir(destination)?.next().is_some()
+        {
+            bail!("Materialize destination must be a new or empty directory.");
+        }
+    } else {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("Cannot create {}", destination.display()))?;
+    }
+
+    let result = async {
+        let seven_zip = find_7zip(seven_zip_path)?;
+        extract_compressed_archive(&seven_zip, archive, destination).await?;
+        let mirror = destination.join("mirror.git");
+        if !is_bare_mirror(&mirror) {
+            bail!("The compressed archive does not contain a valid mirror.git bare repository.");
+        }
+        Ok(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result
+}
+
 async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
-    if !archive.join("HEAD").is_file() || !archive.join("objects").is_dir() {
-        bail!("Source is not a valid bare GitArchive mirror: {}", archive.display());
+    if !is_bare_mirror(archive) {
+        bail!(
+            "Source is not a valid bare GitArchive mirror: {}",
+            archive.display()
+        );
     }
     if destination.exists() {
         bail!(
@@ -115,8 +371,6 @@ async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
         .await
         .context("Could not start Git restore clone")?;
     if !status.success() {
-        // The destination did not exist before this operation, so only this
-        // newly-created partial clone may be removed after a failed clone.
         if destination.exists() {
             let _ = tokio::fs::remove_dir_all(destination).await;
         }
@@ -144,14 +398,275 @@ async fn restore_mirror(archive: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn find_7zip(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+        bail!("The configured 7-Zip executable does not exist: {}", path.display());
+    }
+
+    let names: &[&str] = if cfg!(windows) {
+        &["7z.exe", "7zz.exe", "7z", "7zz"]
+    } else {
+        &["7zz", "7z"]
+    };
+
+    if let Some(path_value) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path_value) {
+            for name in names {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    if cfg!(windows) {
+        for variable in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(variable) {
+                let root = PathBuf::from(root);
+                let candidate = if variable == "LOCALAPPDATA" {
+                    root.join("Programs").join("7-Zip").join("7z.exe")
+                } else {
+                    root.join("7-Zip").join("7z.exe")
+                };
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    bail!("7-Zip command-line executable was not found. Install 7-Zip or add 7z.exe to PATH.")
+}
+
+fn temporary_archive_path(destination: &Path, format: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let filename = destination
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("archive"));
+    let mut temporary_name = OsString::from(".");
+    temporary_name.push(filename);
+    temporary_name.push(format!(".tmp-{}-{nonce}.{format}", std::process::id()));
+    parent_directory(destination).join(temporary_name)
+}
+
+fn backup_archive_path(destination: &Path) -> PathBuf {
+    let filename = destination
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("archive"));
+    let mut backup_name = OsString::from(".");
+    backup_name.push(filename);
+    backup_name.push(".gitarchive-backup");
+    parent_directory(destination).join(backup_name)
+}
+
+fn recover_archive_backup(destination: &Path) -> Result<()> {
+    let backup = backup_archive_path(destination);
+    if backup.is_file() && !destination.exists() {
+        fs::rename(&backup, destination).with_context(|| {
+            format!("Could not recover the previous archive from {}", backup.display())
+        })?;
+    } else if backup.is_file() && destination.is_file() {
+        // A completed new archive was promoted before the previous process exited.
+        fs::remove_file(&backup).with_context(|| {
+            format!("Could not remove stale archive backup {}", backup.display())
+        })?;
+    }
+    Ok(())
+}
+
+fn promote_archive(temporary: &Path, destination: &Path) -> Result<()> {
+    let backup = backup_archive_path(destination);
+    if backup.exists() {
+        if destination.exists() {
+            fs::remove_file(&backup)?;
+        } else {
+            fs::rename(&backup, destination)?;
+        }
+    }
+
+    let had_previous = destination.is_file();
+    if had_previous {
+        fs::rename(destination, &backup).with_context(|| {
+            format!("Could not move the previous archive to {}", backup.display())
+        })?;
+    }
+
+    if let Err(error) = fs::rename(temporary, destination) {
+        if had_previous && backup.exists() {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error).with_context(|| {
+            format!("Could not promote the new archive to {}", destination.display())
+        });
+    }
+
+    if backup.is_file() {
+        fs::remove_file(&backup).with_context(|| {
+            format!("The new archive is ready, but old backup cleanup failed: {}", backup.display())
+        })?;
+    }
+    Ok(())
+}
+
+async fn create_compressed_archive(
+    seven_zip: &Path,
+    source_parent: &Path,
+    destination: &Path,
+    format: &str,
+    level: u8,
+) -> Result<()> {
+    let level_arg = format!("-mx={level}");
+    let mut command = Command::new(seven_zip);
+    command
+        .current_dir(source_parent)
+        .arg("a")
+        .arg(if format == "zip" { "-tzip" } else { "-t7z" })
+        .arg(&level_arg)
+        .arg("-mmt=1")
+        .arg("-y");
+
+    if format == "zip" {
+        command.arg("-mm=Deflate");
+    } else {
+        let dictionary = match level {
+            1 => "16m",
+            5 => "32m",
+            _ => "64m",
+        };
+        command
+            .arg("-m0=LZMA2")
+            .arg(format!("-md={dictionary}"));
+    }
+
+    let status = command
+        .arg(destination)
+        .arg("mirror.git")
+        .status()
+        .await
+        .with_context(|| format!("Could not start 7-Zip at {}", seven_zip.display()))?;
+    if !status.success() {
+        bail!("7-Zip archive creation failed (exit code: {:?}).", status.code());
+    }
+    Ok(())
+}
+
+async fn extract_compressed_archive(
+    seven_zip: &Path,
+    archive: &Path,
+    destination: &Path,
+) -> Result<()> {
+    validate_archive_paths(seven_zip, archive).await?;
+    let output_path = format!("-o{}", destination.display());
+    let status = Command::new(seven_zip)
+        .arg("x")
+        .arg(archive)
+        .arg(output_path)
+        .args(["-y", "-mmt=1"])
+        .status()
+        .await
+        .with_context(|| format!("Could not start 7-Zip at {}", seven_zip.display()))?;
+    if !status.success() {
+        bail!(
+            "7-Zip extraction failed (exit code: {:?}); the original compressed archive was not modified.",
+            status.code()
+        );
+    }
+    Ok(())
+}
+
+async fn validate_archive_paths(seven_zip: &Path, archive: &Path) -> Result<()> {
+    let output = Command::new(seven_zip)
+        .args(["l", "-slt", "-sccUTF-8"])
+        .arg(archive)
+        .output()
+        .await
+        .context("Could not inspect the compressed archive before extraction")?;
+    if !output.status.success() {
+        bail!("7-Zip could not read the archive directory.");
+    }
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut after_separator = false;
+    let mut skipped_archive_path = false;
+    let mut entry_count = 0usize;
+
+    for line in listing.lines() {
+        if line.starts_with("----------") {
+            after_separator = true;
+            continue;
+        }
+        if !after_separator {
+            continue;
+        }
+        if line.starts_with("Symbolic Link =")
+            || line.starts_with("Hard Link =")
+            || line.starts_with("Reparse Point =")
+        {
+            bail!("The compressed archive contains a link entry; extraction was refused.");
+        }
+        if let Some(raw_path) = line.strip_prefix("Path = ") {
+            if !skipped_archive_path {
+                skipped_archive_path = true;
+                continue;
+            }
+            validate_archive_entry_path(raw_path)?;
+            entry_count += 1;
+        }
+    }
+
+    if !skipped_archive_path || entry_count == 0 {
+        bail!("The archive is empty or its file list could not be validated.");
+    }
+    Ok(())
+}
+
+fn validate_archive_entry_path(raw_path: &str) -> Result<()> {
+    let normalized = raw_path.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.starts_with("//") {
+        bail!("The compressed archive contains an absolute path; extraction was refused.");
+    }
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.first() != Some(&"mirror.git")
+        || parts.iter().any(|part| {
+            *part == "."
+                || *part == ".."
+                || part.contains(':')
+                || part.ends_with('.')
+                || part.ends_with(' ')
+                || part.chars().any(char::is_control)
+        })
+    {
+        bail!("The compressed archive contains an unsafe or unexpected path; extraction was refused.");
+    }
+    Ok(())
+}
+
+async fn check_git() -> Result<()> {
+    let output = Command::new("git")
+        .arg("--version")
+        .output()
+        .await
+        .context("Git for Windows was not found. Install Git for Windows and restart GitArchive.")?;
+    if !output.status.success() {
+        bail!("Git is installed but could not run. Check the Git for Windows installation.");
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    println!("INFO: {version}");
+    Ok(())
+}
+
 async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
     println!("INFO: Existing archive found; preserving current refs before fetch.");
     snapshot_refs(destination).await?;
     println!("INFO: Fetching remote refs without pruning.");
 
-    // --mirror sets remote.origin.mirror=true. Override that behavior and
-    // disable pruning explicitly, including when the user's Git config enables it.
-    // The explicit refspec updates current refs but leaves deleted remote refs local.
     let status = Command::new("git")
         .env("GIT_TERMINAL_PROMPT", "0")
         .arg("-C")
@@ -172,20 +687,6 @@ async fn fetch_existing_mirror(destination: &Path) -> Result<()> {
             status.code()
         );
     }
-    Ok(())
-}
-
-async fn check_git() -> Result<()> {
-    let output = Command::new("git")
-        .arg("--version")
-        .output()
-        .await
-        .context("Git for Windows was not found. Install Git for Windows and restart GitArchive.")?;
-    if !output.status.success() {
-        bail!("Git is installed but could not run. Check the Git for Windows installation.");
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    println!("INFO: {version}");
     Ok(())
 }
 
