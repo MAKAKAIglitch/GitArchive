@@ -1016,6 +1016,7 @@ mod tests {
     use super::{
         compression_code, fetch_existing_mirror, restore_mirror,
         validate_archive_entry_path, validate_git_url, valid_storage_format,
+        CpuPriority, MemoryPriority, ProcessPriority,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1074,6 +1075,29 @@ mod tests {
         assert!(validate_git_url("https://git.example.net/team/project.git\n").is_err());
         assert!(validate_git_url("ssh://user:password@git.example.net/team/project.git").is_err());
         assert!(validate_git_url("ssh://-oProxyCommand=bad@git.example.net/team/project.git").is_err());
+    }
+
+    #[test]
+    fn resource_priority_levels_map_to_expected_windows_values() {
+        let minimum = ProcessPriority {
+            cpu: CpuPriority::Idle,
+            memory: MemoryPriority::VeryLow,
+        };
+        let below_normal = ProcessPriority {
+            cpu: CpuPriority::BelowNormal,
+            memory: MemoryPriority::Low,
+        };
+        let normal = ProcessPriority {
+            cpu: CpuPriority::Normal,
+            memory: MemoryPriority::Normal,
+        };
+
+        assert_eq!(minimum.cpu_class(), 0x00000040);
+        assert_eq!(below_normal.cpu_class(), 0x00004000);
+        assert_eq!(normal.cpu_class(), 0x00000020);
+        assert_eq!(minimum.memory_value(), 1);
+        assert_eq!(below_normal.memory_value(), 2);
+        assert_eq!(normal.memory_value(), 5);
     }
 
     #[test]
