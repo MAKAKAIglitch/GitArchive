@@ -19,6 +19,10 @@
 - Keep a persistent local activity log and prevent multiple app instances from writing to the same mirrors.
 - Minimize to the Windows notification area (system tray).
 - Follow Windows light/dark preference and system accent color; request Mica on supported Windows 11 builds.
+- Browse up to 250 commits from the local archive, inspect commit metadata and changed-file summaries, and export any selected commit as a ZIP snapshot.
+- Open a repository context menu with history, sync, open archive, restore, and remove-from-list actions. Removing a list entry never deletes the archive.
+- Optional current-user Windows startup and minimize-to-tray behavior.
+- Optional HTTP, HTTPS, SOCKS4 and SOCKS5 proxy settings for HTTPS Git remotes. SOCKS proxies use remote DNS resolution; proxy credentials are not stored. SSH remotes use the configured SSH transport and do not use Git's HTTP proxy setting.
 
 ## Supported Git servers
 
@@ -43,6 +47,37 @@ git@git.example.net:team/project.git
 GitArchive does not need to know the brand of a custom server: the Git client handles the Git transport. Hosting-provider names are used for display and organization only. HTTPS and SSH are supported; plain HTTP, local filesystem paths, URL-embedded passwords/tokens, query strings, and unsupported remote-helper transports are rejected. Configure private-repository credentials through Git Credential Manager or SSH keys. GitArchive does not ask for or store personal access tokens.
 
 The mirror engine archives Git repository data, not each hosting site's complete web platform. Provider-specific Releases attachments, wiki pages, Issues, Pull Requests/Merge Requests, CI artifacts, Git LFS object payloads, and the separate repositories referenced by submodules are not downloaded in this version. Git LFS pointers remain in Git history until dedicated LFS archiving is added; submodule repositories should be added to GitArchive separately.
+
+## Repository history and context menu
+
+Double-click a repository row or right-click it to open the WinUI-inspired context menu. The history viewer reads commit objects directly from the local bare mirror, including retained snapshots. It shows up to 250 commits and their metadata / changed-file summaries. Select a commit and choose **Download selected commit (.zip)** to export that exact tree. This exports the repository files at that commit; it is not a second copy of the entire Git history.
+
+The context menu also provides sync, open archive folder, restore working copy, and remove from list. **Remove from list does not delete the archive directory.**
+
+## Proxy and startup settings
+
+Settings support HTTP, HTTPS, SOCKS4 and SOCKS5 proxies for HTTPS Git remotes. SOCKS4 uses `socks4a://` and SOCKS5 uses `socks5h://` so DNS resolution is delegated to the proxy. The proxy address and port are stored in the local app config; proxy authentication fields are not implemented. Git's `http.proxy` setting does not proxy SSH clone URLs.
+
+The Windows startup option writes a per-user Run entry (no administrator rights). Background startup starts directly in the tray. The close-to-tray option keeps the app running when the window is closed; use **Exit** in the tray menu to stop it.
+
+## Build a Windows portable app and installer
+
+Install Python 3.11+, Rust stable, Git for Windows, and (for the installer) Inno Setup 6 or 7. Then run:
+
+```bat
+build_windows.bat
+```
+
+The script builds the Rust engine with one Cargo job, packages the PySide6 app as a one-folder portable application with PyInstaller, places the Rust engine beside it, and invokes Inno Setup when its compiler is installed. Outputs:
+
+- Portable application: `dist\\GitArchive\\GitArchive.exe` plus its adjacent runtime files.
+- Installer: `dist-installer\\GitArchive-Setup.exe` (when Inno Setup is installed).
+
+Git for Windows remains a runtime dependency and is not bundled. The installer is per-user and does not require administrator privileges. This build script has not yet been validated on a clean Windows machine; the first packaged build must be smoke-tested before distribution.
+
+## LAN and ZeroTier peer exchange
+
+Peer-to-peer archive exchange is **not implemented yet**. Its security and protocol requirements are documented in [docs/NETWORK_SYNC_DESIGN.md](docs/NETWORK_SYNC_DESIGN.md). The design requires opt-in sharing, mutual TLS 1.3, pinned peer identities, explicit import approval, staging, and `git fsck --full --strict` before an archive is promoted. It will not trust a peer solely because it is on the same LAN or ZeroTier network.
 
 ## Run on Windows
 
