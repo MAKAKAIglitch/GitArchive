@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
@@ -73,6 +75,12 @@ enum MemoryPriority {
     VeryLow,
     Low,
     Normal,
+}
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn background_process_creation_flags(priority: ProcessPriority) -> u32 {
+    priority.cpu_class() | CREATE_NO_WINDOW
 }
 
 impl ProcessPriority {
@@ -194,7 +202,7 @@ unsafe fn set_memory_priority(process: *mut std::ffi::c_void, value: u32) -> boo
 async fn run_background_status(mut command: Command) -> Result<ExitStatus> {
     let priority = ProcessPriority::from_environment();
     #[cfg(windows)]
-    command.creation_flags(priority.cpu_class());
+    command.creation_flags(background_process_creation_flags(priority));
 
     let mut child = command.spawn().context("Could not start a background process")?;
     if let Some(pid) = child.id() {
@@ -206,7 +214,7 @@ async fn run_background_status(mut command: Command) -> Result<ExitStatus> {
 async fn run_background_output(mut command: Command) -> Result<Output> {
     let priority = ProcessPriority::from_environment();
     #[cfg(windows)]
-    command.creation_flags(priority.cpu_class());
+    command.creation_flags(background_process_creation_flags(priority));
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command.spawn().context("Could not start a background process")?;
@@ -384,6 +392,8 @@ fn has_custom_ssh_command(repository: Option<&Path>) -> bool {
     }
 
     let mut probe = std::process::Command::new("git");
+    #[cfg(windows)]
+    probe.creation_flags(background_process_creation_flags(ProcessPriority::from_environment()));
     if let Some(path) = repository {
         probe.arg("-C").arg(path);
     }
@@ -1076,7 +1086,7 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compression_code, fetch_existing_mirror, restore_mirror,
+        background_process_creation_flags, compression_code, fetch_existing_mirror, restore_mirror,
         validate_archive_entry_path, validate_git_url, valid_storage_format,
         CpuPriority, MemoryPriority, ProcessPriority,
     };
@@ -1137,6 +1147,20 @@ mod tests {
         assert!(validate_git_url("https://git.example.net/team/project.git\n").is_err());
         assert!(validate_git_url("ssh://user:password@git.example.net/team/project.git").is_err());
         assert!(validate_git_url("ssh://-oProxyCommand=bad@git.example.net/team/project.git").is_err());
+    }
+
+    #[test]
+    fn background_child_creation_flags_include_no_console_and_cpu_priority() {
+        let idle = ProcessPriority {
+            cpu: CpuPriority::Idle,
+            memory: MemoryPriority::VeryLow,
+        };
+        let below_normal = ProcessPriority {
+            cpu: CpuPriority::BelowNormal,
+            memory: MemoryPriority::Low,
+        };
+        assert_eq!(background_process_creation_flags(idle), 0x08000040);
+        assert_eq!(background_process_creation_flags(below_normal), 0x08004000);
     }
 
     #[test]

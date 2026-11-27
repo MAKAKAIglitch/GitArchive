@@ -24,6 +24,7 @@ from .priority import (
     normalize_cpu_priority,
     normalize_memory_priority,
     process_creation_flags,
+    hide_qprocess_console,
 )
 from .lan import DEFAULT_PORT, LanPeerService, discover_local_peers, import_incoming_bundle
 
@@ -1787,6 +1788,7 @@ class GitArchiveWindow(QMainWindow):
             return
 
         process = QProcess(self)
+        hide_qprocess_console(process)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         process.setProcessEnvironment(background_process_environment(self.config))
         process.readyReadStandardOutput.connect(lambda p=process: self.read_restore_output(p))
@@ -1931,6 +1933,7 @@ class GitArchiveWindow(QMainWindow):
                 errors="replace",
                 timeout=1.5,
                 check=False,
+                creationflags=process_creation_flags(self.config.get("background_cpu_priority", "idle")),
             )
             configured = result.stdout.strip() if result.returncode == 0 else ""
             if configured:
@@ -1987,6 +1990,7 @@ class GitArchiveWindow(QMainWindow):
                 errors="replace",
                 timeout=1.5,
                 check=False,
+                creationflags=process_creation_flags(self.config.get("background_cpu_priority", "idle")),
             )
             if auth_probe.returncode == 0 and auth_probe.stdout.strip():
                 raise ProxyConfigurationError(
@@ -2003,6 +2007,7 @@ class GitArchiveWindow(QMainWindow):
                 errors="replace",
                 timeout=1.5,
                 check=False,
+                creationflags=process_creation_flags(self.config.get("background_cpu_priority", "idle")),
             )
             configured = result.stdout.strip() if result.returncode == 0 else ""
             upstream = (
@@ -2113,6 +2118,7 @@ class GitArchiveWindow(QMainWindow):
                 continue
 
             process = QProcess(self)
+        hide_qprocess_console(process)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             throttle_url = self.prepare_download_proxy(
                 str(repo.get("url") or ""), str(repo.get("local_path") or "")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import subprocess
 from ctypes import wintypes
 
 
@@ -22,6 +21,7 @@ MEMORY_PRIORITY_VALUES = {
 
 PROCESS_MEMORY_PRIORITY_CLASS = 0  # ProcessMemoryPriority
 PROCESS_SET_INFORMATION = 0x0200
+CREATE_NO_WINDOW_FLAG = 0x08000000
 
 
 def normalize_cpu_priority(value: str | None) -> str:
@@ -39,12 +39,28 @@ def memory_priority_value(value: str | None) -> int:
 
 
 def process_creation_flags(cpu_priority: str | None, hide_console: bool = True) -> int:
-    """Return CreateProcess flags; priority is applied at process creation on Windows."""
+    """Return Windows CreateProcess flags for hidden, priority-adjusted background tasks."""
     if os.name != "nt":
         return 0
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hide_console else 0
+    flags = CREATE_NO_WINDOW_FLAG if hide_console else 0
     flags |= CPU_PRIORITY_CLASSES[normalize_cpu_priority(cpu_priority)]
     return flags
+
+
+def apply_no_console_flag(arguments) -> None:
+    """Add CREATE_NO_WINDOW to Qt's Windows CreateProcess arguments."""
+    arguments.flags = int(arguments.flags) | CREATE_NO_WINDOW_FLAG
+
+
+def hide_qprocess_console(process) -> bool:
+    """Hide the console of a Qt-launched child process on Windows."""
+    if os.name != "nt":
+        return False
+    setter = getattr(process, "setCreateProcessArgumentsModifier", None)
+    if not callable(setter):
+        return False
+    setter(apply_no_console_flag)
+    return True
 
 
 def apply_memory_priority_to_handle(handle, priority: str | None) -> bool:

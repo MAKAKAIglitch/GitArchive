@@ -1,6 +1,10 @@
 import unittest
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from gitarchive.priority import (
+    CREATE_NO_WINDOW_FLAG,
     CPU_PRIORITY_CLASSES,
     MEMORY_PRIORITY_VALUES,
     PROCESS_MEMORY_PRIORITY_CLASS,
@@ -8,6 +12,7 @@ from gitarchive.priority import (
     normalize_cpu_priority,
     normalize_memory_priority,
     process_creation_flags,
+    hide_qprocess_console,
 )
 
 
@@ -37,8 +42,32 @@ class BackgroundPriorityTests(unittest.TestCase):
             flags = process_creation_flags(name, hide_console=False)
             if __import__("os").name == "nt":
                 self.assertEqual(flags & priority_class, priority_class)
+                self.assertEqual(flags & CREATE_NO_WINDOW_FLAG, 0)
             else:
                 self.assertEqual(flags, 0)
+
+    def test_default_windows_creation_flags_hide_console(self):
+        import os
+        for name in CPU_PRIORITY_CLASSES:
+            flags = process_creation_flags(name)
+            if os.name == "nt":
+                self.assertEqual(flags & CREATE_NO_WINDOW_FLAG, CREATE_NO_WINDOW_FLAG)
+                self.assertNotEqual(flags & CPU_PRIORITY_CLASSES[name], 0)
+            else:
+                self.assertEqual(flags, 0)
+
+    def test_qprocess_modifier_adds_create_no_window(self):
+        class FakeQProcess:
+            def setCreateProcessArgumentsModifier(self, modifier):
+                self.modifier = modifier
+
+        process = FakeQProcess()
+        with patch("gitarchive.priority.os.name", "nt"):
+            self.assertTrue(hide_qprocess_console(process))
+
+        args = SimpleNamespace(flags=0x00000020)
+        process.modifier(args)
+        self.assertEqual(args.flags, 0x00000020 | CREATE_NO_WINDOW_FLAG)
 
 
 if __name__ == "__main__":
