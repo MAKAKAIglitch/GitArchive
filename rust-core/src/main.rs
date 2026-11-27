@@ -1073,7 +1073,9 @@ fn validate_git_url(url: &str) -> Result<()> {
     bail!("Unsupported Git URL. Use an HTTPS or SSH clone URL.");
 }
 
-fn build_snapshot_update_input(ref_output: &str) -> (String, usize, usize) {
+const SNAPSHOT_BATCH_SIZE: usize = 512;
+
+fn build_snapshot_update_batches(ref_output: &str) -> (Vec<String>, usize, usize) {
     let mut existing_snapshots = HashSet::new();
     let mut source_refs = Vec::new();
     let mut checked = 0usize;
@@ -1093,29 +1095,30 @@ fn build_snapshot_update_input(ref_output: &str) -> (String, usize, usize) {
         source_refs.push((ref_name.to_owned(), object_id.to_owned()));
     }
 
-    // One atomic update-ref transaction replaces one Git process per ref.
-    // Existing content-addressed snapshots are skipped on future sync cycles.
-    let mut input = String::new();
-    let mut saved = 0usize;
+    // Existing content-addressed snapshots are skipped on every later sync.
+    let mut pending_commands = Vec::new();
     for (ref_name, object_id) in source_refs {
         let suffix = ref_name.strip_prefix("refs/").unwrap_or(&ref_name);
         let snapshot_ref = format!("refs/gitarchive/snapshots/{object_id}/{suffix}");
         if existing_snapshots.contains(&snapshot_ref) {
             continue;
         }
-        input.push_str("create ");
-        input.push_str(&snapshot_ref);
-        input.push(' ');
-        input.push_str(&object_id);
-        input.push('\n');
-        saved += 1;
+        pending_commands.push(format!("create {snapshot_ref} {object_id}\n"));
     }
 
-    if saved > 0 {
-        input.insert_str(0, "start\n");
+    // Keep each atomic transaction small enough for Windows filesystems.
+    // If a later batch fails, completed batches are retained and skipped next time.
+    let saved = pending_commands.len();
+    let mut batches = Vec::new();
+    for commands in pending_commands.chunks(SNAPSHOT_BATCH_SIZE) {
+        let mut input = String::from("start\n");
+        for command in commands {
+            input.push_str(command);
+        }
         input.push_str("prepare\ncommit\n");
+        batches.push(input);
     }
-    (input, checked, saved)
+    (batches, checked, saved)
 }
 
 async fn snapshot_refs(repository: &Path) -> Result<()> {
@@ -1132,29 +1135,39 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
     }
 
     let refs = String::from_utf8_lossy(&output.stdout);
-    let (input, checked, saved) = build_snapshot_update_input(&refs);
+    let (batches, checked, saved) = build_snapshot_update_batches(&refs);
     println!(
-        "INFO: Checked {checked} ref(s); {saved} new historical snapshot(s) need saving."
+        "INFO: Checked {checked} ref(s); {saved} new historical snapshot(s) need saving in {} batch(es).",
+        batches.len()
     );
     if saved == 0 {
         println!("INFO: All current ref tips already have historical snapshots.");
         return Ok(());
     }
 
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(repository)
-        .args(["update-ref", "--stdin"]);
-    let update = run_background_input(command, input.as_bytes())
-        .await
-        .context("Could not preserve previous Git refs in one transaction")?;
-    if !update.status.success() {
-        let error = String::from_utf8_lossy(&update.stderr);
-        bail!("Failed to preserve historical Git refs: {}", error.trim());
+    let batch_total = batches.len();
+    for (index, input) in batches.iter().enumerate() {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(repository)
+            .args(["update-ref", "--stdin"]);
+        let update = run_background_input(command, input.as_bytes())
+            .await
+            .with_context(|| format!("Could not preserve historical Git refs in batch {}/{}", index + 1, batch_total))?;
+        if !update.status.success() {
+            let error = String::from_utf8_lossy(&update.stderr);
+            bail!(
+                "Failed to preserve historical Git refs in batch {}/{}: {}",
+                index + 1,
+                batch_total,
+                error.trim()
+            );
+        }
+        println!("INFO: Saved historical snapshot batch {}/{}.", index + 1, batch_total);
     }
 
-    println!("INFO: Preserved {saved} previous ref(s) in one atomic Git transaction.");
+    println!("INFO: Preserved {saved} previous ref(s) in {batch_total} atomic transaction(s).");
     Ok(())
 }
 
@@ -1162,7 +1175,7 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        background_process_creation_flags, build_snapshot_update_input, compression_code,
+        background_process_creation_flags, build_snapshot_update_batches, compression_code,
         fetch_existing_mirror, restore_mirror, validate_archive_entry_path, validate_git_url,
         valid_storage_format,
         CpuPriority, MemoryPriority, ProcessPriority,
@@ -1227,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_input_batches_only_missing_content_addressed_refs() {
+    fn snapshot_batches_include_only_missing_content_addressed_refs() {
         let first = "1111111111111111111111111111111111111111";
         let second = "2222222222222222222222222222222222222222";
         let third = "3333333333333333333333333333333333333333";
@@ -1235,9 +1248,11 @@ mod tests {
             "refs/heads/main {first}\nrefs/heads/feature/test {second}\nrefs/tags/v1 {third}\nrefs/gitarchive/snapshots/{first}/heads/main {first}\nrefs/gitarchive/other/internal {second}\n"
         );
 
-        let (input, checked, saved) = build_snapshot_update_input(&refs);
+        let (batches, checked, saved) = build_snapshot_update_batches(&refs);
         assert_eq!(checked, 3);
         assert_eq!(saved, 2);
+        assert_eq!(batches.len(), 1);
+        let input = &batches[0];
         assert!(input.starts_with("start\n"));
         assert!(input.contains(&format!("create refs/gitarchive/snapshots/{second}/heads/feature/test {second}\n")));
         assert!(input.contains(&format!("create refs/gitarchive/snapshots/{third}/tags/v1 {third}\n")));
@@ -1246,15 +1261,35 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_input_is_empty_when_every_tip_is_already_saved() {
+    fn snapshot_batches_are_bounded_and_cover_every_ref() {
+        let mut refs = String::new();
+        for index in 0..1025 {
+            let oid = format!("{:040x}", index + 1);
+            refs.push_str(&format!("refs/heads/branch-{index} {oid}\n"));
+        }
+
+        let (batches, checked, saved) = build_snapshot_update_batches(&refs);
+        assert_eq!(checked, 1025);
+        assert_eq!(saved, 1025);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].matches("create ").count(), SNAPSHOT_BATCH_SIZE);
+        assert_eq!(batches[1].matches("create ").count(), SNAPSHOT_BATCH_SIZE);
+        assert_eq!(batches[2].matches("create ").count(), 1);
+        assert!(batches.iter().all(|batch| {
+            batch.starts_with("start\n") && batch.ends_with("prepare\ncommit\n")
+        }));
+    }
+
+    #[test]
+    fn snapshot_batches_are_empty_when_every_tip_is_already_saved() {
         let oid = "1111111111111111111111111111111111111111";
         let refs = format!(
             "refs/heads/main {oid}\nrefs/gitarchive/snapshots/{oid}/heads/main {oid}\n"
         );
-        let (input, checked, saved) = build_snapshot_update_input(&refs);
+        let (batches, checked, saved) = build_snapshot_update_batches(&refs);
         assert_eq!(checked, 1);
         assert_eq!(saved, 0);
-        assert!(input.is_empty());
+        assert!(batches.is_empty());
     }
 
     #[test]
