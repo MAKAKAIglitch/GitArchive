@@ -2118,7 +2118,7 @@ class GitArchiveWindow(QMainWindow):
                 continue
 
             process = QProcess(self)
-        hide_qprocess_console(process)
+            hide_qprocess_console(process)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             throttle_url = self.prepare_download_proxy(
                 str(repo.get("url") or ""), str(repo.get("local_path") or "")
