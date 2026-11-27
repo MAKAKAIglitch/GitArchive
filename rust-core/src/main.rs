@@ -1177,7 +1177,7 @@ mod tests {
     use super::{
         background_process_creation_flags, build_snapshot_update_batches, compression_code,
         fetch_existing_mirror, restore_mirror, validate_archive_entry_path, validate_git_url,
-        valid_storage_format,
+        valid_storage_format, SNAPSHOT_BATCH_SIZE,
         CpuPriority, MemoryPriority, ProcessPriority,
     };
     use std::fs;
