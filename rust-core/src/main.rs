@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use std::process::{ExitStatus, Output, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 #[derive(Debug, Parser)]
@@ -225,6 +227,41 @@ async fn run_background_output(mut command: Command) -> Result<Output> {
         .wait_with_output()
         .await
         .context("Could not collect background process output")
+}
+
+async fn run_background_input(mut command: Command, input: &[u8]) -> Result<Output> {
+    let priority = ProcessPriority::from_environment();
+    #[cfg(windows)]
+    command.creation_flags(background_process_creation_flags(priority));
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .context("Could not start a background process with input")?;
+    if let Some(pid) = child.id() {
+        priority.apply_to_pid(pid);
+    }
+
+    let write_result = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(input).await,
+        None => bail!("Background process stdin was not available."),
+    };
+    let output = child
+        .wait_with_output()
+        .await
+        .context("Could not collect background process output")?;
+
+    if let Err(error) = write_result {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Could not send input to background process: {error}. {}",
+            stderr.trim()
+        );
+    }
+    Ok(output)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -1036,6 +1073,51 @@ fn validate_git_url(url: &str) -> Result<()> {
     bail!("Unsupported Git URL. Use an HTTPS or SSH clone URL.");
 }
 
+fn build_snapshot_update_input(ref_output: &str) -> (String, usize, usize) {
+    let mut existing_snapshots = HashSet::new();
+    let mut source_refs = Vec::new();
+    let mut checked = 0usize;
+
+    for line in ref_output.lines() {
+        let Some((ref_name, object_id)) = line.split_once(' ') else {
+            continue;
+        };
+        if ref_name.starts_with("refs/gitarchive/snapshots/") {
+            existing_snapshots.insert(ref_name.to_owned());
+            continue;
+        }
+        if ref_name.starts_with("refs/gitarchive/") {
+            continue;
+        }
+        checked += 1;
+        source_refs.push((ref_name.to_owned(), object_id.to_owned()));
+    }
+
+    // One atomic update-ref transaction replaces one Git process per ref.
+    // Existing content-addressed snapshots are skipped on future sync cycles.
+    let mut input = String::new();
+    let mut saved = 0usize;
+    for (ref_name, object_id) in source_refs {
+        let suffix = ref_name.strip_prefix("refs/").unwrap_or(&ref_name);
+        let snapshot_ref = format!("refs/gitarchive/snapshots/{object_id}/{suffix}");
+        if existing_snapshots.contains(&snapshot_ref) {
+            continue;
+        }
+        input.push_str("create ");
+        input.push_str(&snapshot_ref);
+        input.push(' ');
+        input.push_str(&object_id);
+        input.push('\n');
+        saved += 1;
+    }
+
+    if saved > 0 {
+        input.insert_str(0, "start\n");
+        input.push_str("prepare\ncommit\n");
+    }
+    (input, checked, saved)
+}
+
 async fn snapshot_refs(repository: &Path) -> Result<()> {
     let mut command = Command::new("git");
     command
@@ -1050,35 +1132,29 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
     }
 
     let refs = String::from_utf8_lossy(&output.stdout);
-    let mut saved = 0usize;
-
-    for line in refs.lines() {
-        let Some((ref_name, object_id)) = line.split_once(' ') else {
-            continue;
-        };
-        if ref_name.starts_with("refs/gitarchive/") {
-            continue;
-        }
-        let suffix = ref_name.strip_prefix("refs/").unwrap_or(ref_name);
-        // The object ID makes this snapshot idempotent: unchanged refs do not
-        // create another snapshot every ten-minute synchronization cycle.
-        let snapshot_ref = format!("refs/gitarchive/snapshots/{object_id}/{suffix}");
-        let mut command = Command::new("git");
-        command
-            .arg("-C")
-            .arg(repository)
-            .args(["update-ref", &snapshot_ref, object_id]);
-        let update = run_background_output(command)
-            .await
-            .context("Could not preserve an old Git ref")?;
-        if !update.status.success() {
-            let error = String::from_utf8_lossy(&update.stderr);
-            bail!("Failed to preserve {ref_name}: {}", error.trim());
-        }
-        saved += 1;
+    let (input, checked, saved) = build_snapshot_update_input(&refs);
+    println!(
+        "INFO: Checked {checked} ref(s); {saved} new historical snapshot(s) need saving."
+    );
+    if saved == 0 {
+        println!("INFO: All current ref tips already have historical snapshots.");
+        return Ok(());
     }
 
-    println!("INFO: Preserved {saved} previous ref(s).");
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repository)
+        .args(["update-ref", "--stdin"]);
+    let update = run_background_input(command, input.as_bytes())
+        .await
+        .context("Could not preserve previous Git refs in one transaction")?;
+    if !update.status.success() {
+        let error = String::from_utf8_lossy(&update.stderr);
+        bail!("Failed to preserve historical Git refs: {}", error.trim());
+    }
+
+    println!("INFO: Preserved {saved} previous ref(s) in one atomic Git transaction.");
     Ok(())
 }
 
@@ -1086,8 +1162,9 @@ async fn snapshot_refs(repository: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        background_process_creation_flags, compression_code, fetch_existing_mirror, restore_mirror,
-        validate_archive_entry_path, validate_git_url, valid_storage_format,
+        background_process_creation_flags, build_snapshot_update_input, compression_code,
+        fetch_existing_mirror, restore_mirror, validate_archive_entry_path, validate_git_url,
+        valid_storage_format,
         CpuPriority, MemoryPriority, ProcessPriority,
     };
     use std::fs;
@@ -1147,6 +1224,37 @@ mod tests {
         assert!(validate_git_url("https://git.example.net/team/project.git\n").is_err());
         assert!(validate_git_url("ssh://user:password@git.example.net/team/project.git").is_err());
         assert!(validate_git_url("ssh://-oProxyCommand=bad@git.example.net/team/project.git").is_err());
+    }
+
+    #[test]
+    fn snapshot_input_batches_only_missing_content_addressed_refs() {
+        let first = "1111111111111111111111111111111111111111";
+        let second = "2222222222222222222222222222222222222222";
+        let third = "3333333333333333333333333333333333333333";
+        let refs = format!(
+            "refs/heads/main {first}\nrefs/heads/feature/test {second}\nrefs/tags/v1 {third}\nrefs/gitarchive/snapshots/{first}/heads/main {first}\nrefs/gitarchive/other/internal {second}\n"
+        );
+
+        let (input, checked, saved) = build_snapshot_update_input(&refs);
+        assert_eq!(checked, 3);
+        assert_eq!(saved, 2);
+        assert!(input.starts_with("start\n"));
+        assert!(input.contains(&format!("create refs/gitarchive/snapshots/{second}/heads/feature/test {second}\n")));
+        assert!(input.contains(&format!("create refs/gitarchive/snapshots/{third}/tags/v1 {third}\n")));
+        assert!(!input.contains(&format!("create refs/gitarchive/snapshots/{first}/heads/main {first}\n")));
+        assert!(input.ends_with("prepare\ncommit\n"));
+    }
+
+    #[test]
+    fn snapshot_input_is_empty_when_every_tip_is_already_saved() {
+        let oid = "1111111111111111111111111111111111111111";
+        let refs = format!(
+            "refs/heads/main {oid}\nrefs/gitarchive/snapshots/{oid}/heads/main {oid}\n"
+        );
+        let (input, checked, saved) = build_snapshot_update_input(&refs);
+        assert_eq!(checked, 1);
+        assert_eq!(saved, 0);
+        assert!(input.is_empty());
     }
 
     #[test]
